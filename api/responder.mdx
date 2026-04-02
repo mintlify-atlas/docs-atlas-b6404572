@@ -1,0 +1,350 @@
+---
+title: "Responder API"
+description: "Functions for building an SPDM Responder: dispatching requests, registering callbacks, and managing sessions."
+---
+
+The Responder API provides the main dispatch loop and callback registration points for an SPDM Responder. Before calling any function in this section, initialize the SPDM context using the [Common API](/api/common) and populate it with the Responder's capabilities, algorithms, and certificate chains.
+
+All registration functions return `void` unless otherwise noted. `libspdm_responder_dispatch_message` returns `libspdm_return_t`.
+
+---
+
+## Message Dispatch
+
+<Accordion title="libspdm_responder_dispatch_message">
+
+Waits for an incoming SPDM request, processes it, and sends the corresponding response.
+
+**Signature**
+```c
+libspdm_return_t libspdm_responder_dispatch_message(void *spdm_context);
+```
+
+**Description**
+
+This is the primary entry point for a Responder. It calls the registered `libspdm_device_receive_message_func` to receive a request, processes it according to the SPDM specification, and calls `libspdm_device_send_message_func` to send the response. The function handles the full SPDM protocol state machine including session establishment and teardown.
+
+Typical usage is to call this function in a loop or from a hardware interrupt handler that triggers when a message arrives.
+
+Before calling this function, the integrator must have:
+1. Initialized the context (`libspdm_init_context`)
+2. Registered device I/O and transport callbacks
+3. Set the scratch buffer
+4. Configured the Responder's capabilities and algorithms via `libspdm_set_data`
+5. Provisioned the local certificate chain(s) via `libspdm_set_data` with `LIBSPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN`
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+**Return value**
+
+`LIBSPDM_STATUS_SUCCESS` when a request was successfully processed and a response was sent. A non-zero value indicates a processing error.
+
+```c
+/* Responder main loop */
+while (true) {
+    libspdm_return_t status = libspdm_responder_dispatch_message(spdm_context);
+    if (status != LIBSPDM_STATUS_SUCCESS) {
+        /* Log or handle the error; the context may need to be reset */
+    }
+}
+```
+
+</Accordion>
+
+---
+
+## Application Message Callback
+
+<Accordion title="libspdm_get_response_func (callback signature)">
+
+Callback invoked when libspdm receives an application (non-SPDM) message or a vendor-defined message that the library itself cannot handle.
+
+**Typedef**
+```c
+typedef libspdm_return_t (*libspdm_get_response_func)(
+    void *spdm_context,
+    const uint32_t *session_id,
+    bool is_app_message,
+    size_t request_size,
+    const void *request,
+    size_t *response_size,
+    void *response);
+```
+
+**Description**
+
+Register an implementation of this callback using `libspdm_register_get_response_func`. libspdm calls this function when it receives a message it cannot process internally (typically application data delivered within a secure session, or vendor-defined SPDM messages).
+
+<ParamField path="spdm_context" type="void *">
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="const uint32_t *">
+  Non-NULL if the message arrived within a secure session; NULL if unsecured.
+</ParamField>
+
+<ParamField path="is_app_message" type="bool">
+  `true` if the message is an application (non-SPDM) message; `false` if it is an SPDM message that the default handler could not process.
+</ParamField>
+
+<ParamField path="request_size" type="size_t">
+  Size of the request message in bytes.
+</ParamField>
+
+<ParamField path="request" type="const void *">
+  Pointer to the request message buffer.
+</ParamField>
+
+<ParamField path="response_size" type="size_t *">
+  On input: size of the response buffer. On output: actual size of the response written.
+</ParamField>
+
+<ParamField path="response" type="void *">
+  Pointer to the response buffer.
+</ParamField>
+
+**Return value**
+
+Return `LIBSPDM_STATUS_SUCCESS` after writing a valid response, or an error code if the message cannot be handled.
+
+```c
+libspdm_return_t my_app_message_handler(
+        void *spdm_context, const uint32_t *session_id,
+        bool is_app_message, size_t request_size,
+        const void *request, size_t *response_size,
+        void *response)
+{
+    /* Dispatch application-layer message */
+    if (is_app_message) {
+        return handle_my_protocol(session_id, request,
+                                  request_size, response, response_size);
+    }
+    /* Unknown SPDM message — generate an error response */
+    return libspdm_generate_error_response(spdm_context,
+               SPDM_ERROR_CODE_UNSUPPORTED_REQUEST, 0,
+               response_size, response);
+}
+```
+
+</Accordion>
+
+<Accordion title="libspdm_register_get_response_func">
+
+Registers the application message callback with the SPDM context.
+
+**Signature**
+```c
+void libspdm_register_get_response_func(
+    void *spdm_context,
+    libspdm_get_response_func get_response_func);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="get_response_func" type="libspdm_get_response_func" required>
+  Pointer to the application message handler function.
+</ParamField>
+
+```c
+libspdm_register_get_response_func(spdm_context, my_app_message_handler);
+```
+
+</Accordion>
+
+---
+
+## Vendor-Defined Message Callback
+
+<Accordion title="libspdm_register_vendor_callback_func">
+
+Registers a callback for handling vendor-defined request messages. Available when `LIBSPDM_ENABLE_VENDOR_DEFINED_MESSAGES` is enabled.
+
+**Signature**
+```c
+libspdm_return_t libspdm_register_vendor_callback_func(
+    void *spdm_context,
+    libspdm_vendor_response_callback_func resp_callback);
+```
+
+**Description**
+
+The registered callback is invoked when the Responder receives a `VENDOR_DEFINED_REQUEST` message. This allows integrators to implement proprietary SPDM extensions without modifying libspdm internals.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="resp_callback" type="libspdm_vendor_response_callback_func" required>
+  Callback function. Signature:
+  ```c
+  libspdm_return_t vendor_cb(
+      void *spdm_context,
+      const uint32_t *session_id,
+      uint16_t req_standard_id,
+      uint8_t req_vendor_id_len,
+      const void *req_vendor_id,
+      uint32_t req_size,
+      const void *req_data,
+      uint32_t *resp_size,
+      void *resp_data);
+  ```
+</ParamField>
+
+**Return value**
+
+`LIBSPDM_STATUS_SUCCESS` on success. `LIBSPDM_STATUS_INVALID_PARAMETER` if any argument is NULL.
+
+</Accordion>
+
+---
+
+## Session & Connection State Callbacks
+
+<Accordion title="libspdm_session_state_callback_func (callback signature)">
+
+Callback invoked whenever a session changes state.
+
+**Typedef**
+```c
+typedef void (*libspdm_session_state_callback_func)(
+    void *spdm_context,
+    uint32_t session_id,
+    libspdm_session_state_t session_state);
+```
+
+<ParamField path="spdm_context" type="void *">
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="uint32_t">
+  The session whose state changed.
+</ParamField>
+
+<ParamField path="session_state" type="libspdm_session_state_t">
+  The new session state:
+  - `LIBSPDM_SESSION_STATE_NOT_STARTED` — Initial state or after session ended.
+  - `LIBSPDM_SESSION_STATE_HANDSHAKING` — Handshake phase in progress.
+  - `LIBSPDM_SESSION_STATE_ESTABLISHED` — Session fully established; application data may flow.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="libspdm_register_session_state_callback_func">
+
+Registers a session state change callback. May be called multiple times to register multiple callbacks.
+
+**Signature**
+```c
+void libspdm_register_session_state_callback_func(
+    void *spdm_context,
+    libspdm_session_state_callback_func spdm_session_state_callback);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="spdm_session_state_callback" type="libspdm_session_state_callback_func" required>
+  The callback to invoke on session state changes.
+</ParamField>
+
+```c
+void on_session_state(void *ctx, uint32_t sid, libspdm_session_state_t state) {
+    if (state == LIBSPDM_SESSION_STATE_ESTABLISHED) {
+        printf("Session 0x%08x established\n", sid);
+    }
+}
+libspdm_register_session_state_callback_func(spdm_context, on_session_state);
+```
+
+</Accordion>
+
+<Accordion title="libspdm_connection_state_callback_func (callback signature)">
+
+Callback invoked whenever the SPDM connection changes state.
+
+**Typedef**
+```c
+typedef void (*libspdm_connection_state_callback_func)(
+    void *spdm_context,
+    libspdm_connection_state_t connection_state);
+```
+
+<ParamField path="spdm_context" type="void *">
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="connection_state" type="libspdm_connection_state_t">
+  The new connection state. See `LIBSPDM_DATA_CONNECTION_STATE` in [Context Data Types](/api/context-data-types) for the full list of state values.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="libspdm_register_connection_state_callback_func">
+
+Registers a connection state change callback. May be called multiple times.
+
+**Signature**
+```c
+void libspdm_register_connection_state_callback_func(
+    void *spdm_context,
+    libspdm_connection_state_callback_func spdm_connection_state_callback);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="spdm_connection_state_callback" type="libspdm_connection_state_callback_func" required>
+  The callback to invoke on connection state changes.
+</ParamField>
+
+</Accordion>
+
+---
+
+## Error Response Helpers
+
+<Accordion title="libspdm_generate_error_response">
+
+Generates a standard SPDM `ERROR` response message.
+
+**Signature**
+```c
+libspdm_return_t libspdm_generate_error_response(
+    const void *spdm_context,
+    uint8_t error_code,
+    uint8_t error_data,
+    size_t *spdm_response_size,
+    void *spdm_response);
+```
+
+**Description**
+
+Intended to be called from within a `libspdm_get_response_func` callback when the integrator cannot handle a request. The `error_code` and `error_data` values are written directly into `Param1` and `Param2` of the `ERROR` response without validation.
+
+<ParamField path="spdm_context" type="const void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="error_code" type="uint8_t" required>
+  SPDM error code (`Param1`). Use one of the `SPDM_ERROR_CODE_*` constants.
+</ParamField>
+
+<ParamField path="error_data" type="uint8_t" required>
+  Error data (`Param2`). Meaning is error-code-dependent.
+</ParamField>
+
+<ParamField path="spdm_response_size" type="size_t *" required>
+  On input: response buffer capacity. On output: bytes written.
+</ParamField>
+
+<ParamField path="spdm_response" type="void *" required>
+  Buffer for the `ERROR` response message.
+</ParamField>
+
+</Accordion>

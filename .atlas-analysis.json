@@ -1,28 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "libspdm",
+  "projectType": "sdk-library",
+  "projectName": "libspdm",
+  "projectDescription": "DMTF's reference implementation of the Security Protocol and Data Model (SPDM) specification, providing C libraries for building SPDM Requesters and Responders in embedded and systems environments.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#203c8d",
-    "light": "#8ca4cc",
-    "dark": "#cfd4e4"
-  },
-  "favicon": "https://media.brand.dev/ae105e10-0609-43ab-a59f-697060469306.jpg",
-  "logo": {
-    "light": "https://media.brand.dev/9029b979-8da4-4adb-bc5c-51f5340e62e5.png",
-    "dark": "https://media.brand.dev/9029b979-8da4-4adb-bc5c-51f5340e62e5.png"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/DMTF/libspdm"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/DMTF/libspdm"
-    }
-  },
+  "primaryColor": "#203c8d",
+  "lightColor": "#8ca4cc",
+  "darkColor": "#cfd4e4",
   "navigation": {
     "tabs": [
       {
@@ -104,5 +87,38 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "SPDM 1.0–1.4 Requester and Responder implementation",
+    "Secure session establishment via KEY_EXCHANGE and PSK_EXCHANGE",
+    "Device attestation via GET_MEASUREMENTS and CHALLENGE",
+    "Multiple transport bindings: MCTP, PCI DOE, Storage, TCP",
+    "Traditional and post-quantum cryptography (ML-DSA, SLH-DSA, ML-KEM)",
+    "FIPS 140-3 cryptographic algorithm self-test support",
+    "Zero dynamic memory allocation — suitable for embedded environments",
+    "OpenSSL and Mbed TLS cryptography backends",
+    "Multi-architecture support: x64, ia32, ARM, AArch64, RISC-V"
+  ],
+  "publicApiSurface": [
+    "libspdm_init_context",
+    "libspdm_deinit_context",
+    "libspdm_set_data / libspdm_get_data",
+    "libspdm_register_device_io_func",
+    "libspdm_register_transport_layer_func",
+    "libspdm_register_device_buffer_func",
+    "libspdm_init_connection",
+    "libspdm_get_digest",
+    "libspdm_get_certificate",
+    "libspdm_challenge",
+    "libspdm_get_measurement",
+    "libspdm_start_session",
+    "libspdm_stop_session",
+    "libspdm_heartbeat",
+    "libspdm_key_update",
+    "libspdm_get_csr",
+    "libspdm_set_certificate",
+    "libspdm_responder_dispatch_message",
+    "libspdm_register_get_response_func",
+    "libspdm_init_msg_log / libspdm_set_msg_log_mode"
+  ]
 }

@@ -1,0 +1,104 @@
+---
+title: "Raw Public Key"
+description: "Using raw public keys instead of certificate chains for SPDM authentication in resource-constrained environments."
+---
+
+Raw public key mode allows an SPDM requester or responder to authenticate using a bare public key rather than a full X.509 certificate chain. The key is encoded as a `SubjectPublicKeyInfo` structure in ASN.1 DER format, as defined by [RFC 7250](https://www.rfc-editor.org/rfc/rfc7250).
+
+## When to Use Raw Public Keys
+
+Certificate-based authentication requires storing and validating entire certificate chains, which can be impractical for resource-constrained devices that lack:
+
+- Sufficient flash or RAM to hold multi-certificate chains
+- A PKI infrastructure to issue and revoke certificates
+- The processing capacity to parse and verify certificate fields
+
+Raw public key mode eliminates these requirements by pre-provisioning a known public key directly into both ends of the connection. It is appropriate for closed, controlled deployments where both the requester and responder are manufactured or enrolled by the same party.
+
+## Key Format
+
+The public key must be ASN.1 DER-encoded as a `SubjectPublicKeyInfo` structure — the same format used for the public key field inside an X.509 certificate, but without any certificate wrapper.
+
+OpenSSL can extract this from an existing private key:
+
+```c
+// Shell command — not C code
+// openssl pkey -in end_point.key.priv.pem -inform PEM -pubout -outform DER -out end_point.key.pub.der
+```
+
+## Crypto Library Support
+
+| Crypto Library | RSA | ECDSA | EdDSA | SM2DSA |
+|----------------|-----|-------|-------|--------|
+| OpenSSL | Yes (`d2i_RSA_PUBKEY_bio`) | Yes (`d2i_EC_PUBKEY_bio`) | Yes (`d2i_PUBKEY_bio`) | Yes (`d2i_PUBKEY_bio`) |
+| MbedTLS | Yes (`mbedtls_pk_parse_public_key`) | Yes (`mbedtls_pk_parse_public_key`) | No | No |
+
+## Configuration
+
+Raw public keys are registered with `libspdm_set_data()` using two data types:
+
+| Data type | Purpose |
+|-----------|---------|
+| `LIBSPDM_DATA_PEER_PUBLIC_KEY` | The remote peer's public key, used to verify the peer's identity |
+| `LIBSPDM_DATA_LOCAL_PUBLIC_KEY` | The local device's public key, sent to the peer during mutual authentication |
+
+Both keys must be registered before initiating or accepting a connection.
+
+### Requester-side setup
+
+```c
+libspdm_data_parameter_t parameter;
+
+/* Register the responder's public key for verification */
+parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+libspdm_set_data(spdm_context,
+                 LIBSPDM_DATA_PEER_PUBLIC_KEY,
+                 &parameter,
+                 peer_public_key,
+                 peer_public_key_size);
+
+/* Register the requester's own public key for mutual authentication */
+parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+libspdm_set_data(spdm_context,
+                 LIBSPDM_DATA_LOCAL_PUBLIC_KEY,
+                 &parameter,
+                 local_public_key,
+                 local_public_key_size);
+```
+
+### Responder-side setup
+
+```c
+libspdm_data_parameter_t parameter;
+
+/* Register the requester's public key for mutual authentication verification */
+parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+libspdm_set_data(spdm_context,
+                 LIBSPDM_DATA_PEER_PUBLIC_KEY,
+                 &parameter,
+                 peer_public_key,
+                 peer_public_key_size);
+
+/* Register the responder's own public key */
+parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+libspdm_set_data(spdm_context,
+                 LIBSPDM_DATA_LOCAL_PUBLIC_KEY,
+                 &parameter,
+                 local_public_key,
+                 local_public_key_size);
+```
+
+The `peer_public_key` and `local_public_key` buffers must remain valid for the lifetime of the `spdm_context`; libspdm stores a pointer, not a copy.
+
+## Limitations Compared to Certificate-Based Authentication
+
+| Capability | Certificate chains | Raw public key |
+|------------|--------------------|----------------|
+| Revocation | Supported via CRL / OCSP | Not supported |
+| Identity binding | Subject name, SAN, issuer hierarchy | None — key is trusted by provisioning only |
+| Multiple trusted peers | Multiple root certs via `LIBSPDM_DATA_PEER_PUBLIC_ROOT_CERT` | One peer key per context |
+| Key rotation | Re-issue certificate | Re-provision key on both devices |
+| Offline enrollment | PKI chain of trust | Out-of-band key exchange required |
+| EdDSA / SM2DSA on MbedTLS | Supported | Not supported |
+
+Raw public key mode provides no mechanism to revoke trust in a compromised key other than re-provisioning all peer devices. For deployments requiring revocation or scalable enrollment, certificate-based authentication is the appropriate choice.

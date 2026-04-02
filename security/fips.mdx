@@ -1,0 +1,129 @@
+---
+title: "FIPS 140-3 Support"
+description: "Cryptographic algorithm self-tests and FIPS 140-3 build configuration in libspdm."
+---
+
+libspdm 3.0.0 introduced support for [FIPS 140-3](https://csrc.nist.gov/publications/detail/fips/140/3/final) cryptographic algorithm self-tests.
+
+<Note>
+  libspdm provides algorithm self-tests only. The SPDM Working Group does not plan to obtain [CMVP](https://csrc.nist.gov/Projects/cryptographic-module-validation-program) or [CAVP](https://csrc.nist.gov/Projects/cryptographic-algorithm-validation-program) certification for libspdm. **Integrators are responsible for selecting a CMVP-certified crypto module and obtaining their own certification.**
+</Note>
+
+## Algorithm Self-Tests
+
+libspdm implements Known Answer Tests (KAT) and Pairwise Consistency Tests (PCT) for the algorithms listed below.
+
+| Algorithm | Type | Test Attributes | FIPS Approved |
+|-----------|------|-----------------|---------------|
+| SHA-256/384/512 | KAT | SHA-256/384/512 | Yes |
+| SHA3-256/384/512 | KAT | SHA3-256/384/512 | Yes |
+| RSA-SSA | KAT | RSA-SSA2048 + SHA-256 | Yes |
+| RSA-PSS | KAT | RSA-PSS2048 + SHA-256 | Yes |
+| ECDSA | KAT (fixed random) | ECDSA-P256 + SHA-256 | Yes |
+| EdDSA | KAT | EdDSA-25519, EdDSA-448 | Yes |
+| HMAC | KAT | HMAC-SHA-256/384/512 | Yes |
+| AES-GCM | KAT | AES-GCM-256 | Yes |
+| FFDHE | PCT | FFDHE-2048 | Yes |
+| ECDHE | KAT | ECDHE-P256 | Yes |
+| HKDF | KAT | HKDF-HMAC-SHA-256 | Yes |
+| ML-KEM | KAT | ML-KEM-1024 | Yes |
+| ML-DSA | KAT | ML-DSA-87 | Yes |
+| SLH-DSA | KAT | SLH-DSA-SHA2-128s | Yes |
+| ChaCha20-Poly1305 | KAT | — | **No** |
+| SM3 | KAT | — | **No** |
+| SM4-GCM | KAT | — | **No** |
+| SM2 (DSA + key exchange) | KAT | — | **No** |
+| SPDM-Key-Schedule | KAT | — | **No** |
+
+**KAT** = Known Answer Test. **PCT** = Pairwise Consistency Test.
+
+When `LIBSPDM_FIPS_MODE=1` is set, non-approved algorithms (`ChaCha20-Poly1305`, `SM2`, `SM3`, `SM4-GCM`) are automatically disabled at compile time.
+
+## Enabling FIPS Mode
+
+### Build configuration
+
+Define `LIBSPDM_FIPS_MODE=1` in your build system or in `spdm_lib_config.h`:
+
+```c
+#define LIBSPDM_FIPS_MODE 1
+```
+
+When enabled, only the FIPS-approved algorithm families listed above are compiled in. The following CMake flags (among others) are permitted:
+
+```c
+LIBSPDM_SHA256_SUPPORT, LIBSPDM_SHA384_SUPPORT, LIBSPDM_SHA512_SUPPORT
+LIBSPDM_SHA3_256_SUPPORT, LIBSPDM_SHA3_384_SUPPORT, LIBSPDM_SHA3_512_SUPPORT
+LIBSPDM_RSA_SSA_2048_SUPPORT, LIBSPDM_RSA_PSS_2048_SUPPORT
+LIBSPDM_ECDSA_P256_SUPPORT, LIBSPDM_ECDSA_P384_SUPPORT, LIBSPDM_ECDSA_P521_SUPPORT
+LIBSPDM_EDDSA_ED25519_SUPPORT, LIBSPDM_EDDSA_ED448_SUPPORT
+LIBSPDM_FFDHE_2048_SUPPORT, LIBSPDM_ECDHE_P256_SUPPORT
+LIBSPDM_AEAD_AES_128_GCM_SUPPORT, LIBSPDM_AEAD_AES_256_GCM_SUPPORT
+LIBSPDM_ML_KEM_512_SUPPORT, LIBSPDM_ML_KEM_768_SUPPORT, LIBSPDM_ML_KEM_1024_SUPPORT
+LIBSPDM_ML_DSA_44_SUPPORT, LIBSPDM_ML_DSA_65_SUPPORT, LIBSPDM_ML_DSA_87_SUPPORT
+LIBSPDM_SLH_DSA_SHA2_128S_SUPPORT  /* and other SLH-DSA variants */
+```
+
+The following flags are **disabled** when FIPS mode is active:
+
+```c
+LIBSPDM_SM2_DSA_P256_SUPPORT
+LIBSPDM_SM2_KEY_EXCHANGE_P256_SUPPORT
+LIBSPDM_AEAD_CHACHA20_POLY1305_SUPPORT
+LIBSPDM_AEAD_SM4_128_GCM_SUPPORT
+LIBSPDM_SM3_256_SUPPORT
+```
+
+### Querying FIPS mode at runtime
+
+```c
+bool is_fips = libspdm_get_fips_mode(spdm_context);
+```
+
+### Running self-tests
+
+Self-tests must be run before using the library in FIPS mode. Allocate a context, run the tests, and abort if any test fails:
+
+```c
+#if LIBSPDM_FIPS_MODE
+    void   *fips_selftest_context;
+    void   *fips_selftest_buffer;
+    size_t  fips_selftest_buffer_size;
+    bool    result;
+
+    fips_selftest_context = malloc(libspdm_get_fips_selftest_context_size());
+    if (fips_selftest_context == NULL) {
+        return NULL;
+    }
+
+    fips_selftest_buffer_size = libspdm_get_fips_selftest_buffer_size();
+    fips_selftest_buffer = malloc(fips_selftest_buffer_size);
+    if (fips_selftest_buffer == NULL) {
+        return NULL;
+    }
+
+    libspdm_init_fips_selftest_context(fips_selftest_context,
+                                       fips_selftest_buffer_size,
+                                       fips_selftest_buffer);
+
+    result = libspdm_fips_run_selftest(fips_selftest_context);
+    free(fips_selftest_buffer);
+    if (!result) {
+        return NULL;  /* abort — a self-test failed */
+    }
+#endif
+```
+
+`libspdm_fips_run_selftest()` returns `false` if any individual algorithm self-test fails. Individual tests such as `libspdm_fips_selftest_sha256()`, `libspdm_fips_selftest_ecdsa()`, and `libspdm_fips_selftest_mlkem()` can also be called directly from `spdm_crypt_lib.h`.
+
+<Warning>
+  If the underlying crypto library does not support a FIPS algorithm, that algorithm **must** be explicitly disabled before calling `libspdm_fips_run_selftest()`, otherwise the self-test will fail. For example, mbedTLS does not support SHA3, EdDSA, ML-KEM, ML-DSA, or SLH-DSA; these must be disabled with their corresponding `_SUPPORT=0` flags when linking against mbedTLS.
+</Warning>
+
+## Key Zeroization
+
+libspdm explicitly zeroizes all key material when it is no longer in use. Private signing keys are managed by `asymsignlib`; PSKs are managed by `psklib`. Library providers implementing these HAL interfaces must also guarantee key zeroization after use.
+
+## Software Integrity Self-Test
+
+libspdm does not implement a software integrity self-test internally. Integrators who build libspdm as a binary module are responsible for implementing and running their own integrity check as required by FIPS 140-3.

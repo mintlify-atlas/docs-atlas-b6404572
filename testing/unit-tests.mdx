@@ -1,0 +1,106 @@
+---
+title: "Unit Tests"
+---
+
+libspdm uses [cmocka](https://cmocka.org/) (version 1.1.7) as its unit test framework. Unit tests cover both the SPDM requester and responder roles.
+
+## Building
+
+Before running any tests, build libspdm first. On Linux:
+
+```bash
+cd libspdm
+mkdir build
+cd build
+cmake -DARCH=x64 -DTOOLCHAIN=GCC -DTARGET=Debug -DCRYPTO=mbedtls ..
+make copy_sample_key
+make
+```
+
+On Windows (x64 Native Tools Command Prompt):
+
+```bash
+cd libspdm
+mkdir build
+cd build
+cmake -G"NMake Makefiles" -DARCH=x64 -DTOOLCHAIN=VS2019 -DTARGET=Debug -DCRYPTO=mbedtls ..
+nmake copy_sample_key
+nmake
+```
+
+## Running Unit Tests
+
+Test binaries are written to `libspdm/build/bin`. Open a command prompt in that directory and run:
+
+```bash
+./test_spdm_requester > NUL
+./test_spdm_responder > NUL
+```
+
+<Warning>
+  You must run these commands with `build/bin` as your current working directory.
+  Running from `build/` with a path like `bin/test_spdm_responder` will cause
+  tests to fail.
+</Warning>
+
+## Expected Output
+
+A passing run produces cmocka-formatted output like the following:
+
+```
+[==========] Running 2 test(s).
+[ RUN      ] test_spdm_responder_version_case1
+[       OK ] test_spdm_responder_version_case1
+[ RUN      ] test_spdm_responder_version_case2
+[       OK ] test_spdm_responder_version_case2
+[==========] 2 test(s) run.
+[  PASSED  ] 2 test(s).
+```
+
+## Cross-Architecture Testing with QEMU
+
+libspdm supports running unit tests for non-native architectures on Linux using [QEMU](https://qemu.org). Supported targets: `arm`, `aarch64`, `riscv32`, `riscv64`, `arc`.
+
+### Install QEMU
+
+```bash
+sudo apt-get install build-essential pkg-config zlib1g-dev libglib2.0-0 libglib2.0-dev \
+  libsdl2-dev libpixman-1-dev libfdt-dev autoconf automake libtool librbd-dev libaio-dev \
+  flex bison -y
+wget https://download.qemu.org/qemu-4.2.0.tar.xz
+tar xvf qemu-4.2.0.tar.xz
+cd qemu-4.2.0
+./configure --prefix=/usr/local/qemu --audio-drv-list=
+sudo make -j 8 && sudo make install
+sudo ln -s /usr/local/qemu/bin/* /usr/local/bin
+```
+
+### Install the Cross-Compiler
+
+Refer to the [build documentation](https://github.com/DMTF/libspdm/blob/main/doc/build.md) for the appropriate cross-compiler for your target architecture.
+
+### Run Tests
+
+After building for the target architecture, run the test binary through the appropriate QEMU user-mode emulator:
+
+```bash
+# arm (ARM_GCC toolchain)
+qemu-arm -L /usr/arm-linux-gnueabi <TestBinary>
+
+# aarch64 (AARCH64_GCC toolchain)
+qemu-aarch64 -L /usr/aarch64-linux-gnu <TestBinary>
+
+# riscv32 (RISCV GNU toolchain)
+qemu-riscv32 -L /opt/riscv32/sysroot <TestBinary>
+
+# riscv64 (RISCV64 GCC toolchain)
+qemu-riscv64 -L /usr/riscv64-linux-gnu <TestBinary>
+```
+
+## Associated Test Repositories
+
+**[SPDM-Responder-Validator](https://github.com/DMTF/SPDM-Responder-Validator)**
+Builds an OS application for validating SPDM Responder implementations against the specification.
+
+**[spdm-emu](https://github.com/DMTF/spdm-emu)**
+Implements a full SPDM Requester and Responder using libspdm. Useful for integration testing and tracing communication between Requester and Responder.

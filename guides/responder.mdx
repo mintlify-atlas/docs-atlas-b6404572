@@ -1,0 +1,259 @@
+---
+title: "Building a Responder"
+description: "Step-by-step guide to implementing an SPDM Responder using libspdm."
+keywords: ["spdm", "responder", "libspdm", "authentication", "measurements", "sessions"]
+---
+
+<Steps>
+
+<Step title="Choose libraries">
+
+Select the appropriate library configuration before writing any code.
+
+**Config macros** — Edit `include/library/spdm_lib_config.h` to enable the algorithms
+and capabilities your device needs:
+
+```c
+/* Cryptography */
+#define LIBSPDM_RSA_SSA_2048_SUPPORT  1
+#define LIBSPDM_ECDHE_P256_SUPPORT    1
+
+/* Capabilities */
+#define LIBSPDM_ENABLE_CAPABILITY_PSK_CAP      1
+#define LIBSPDM_ENABLE_CAPABILITY_MUT_AUTH_CAP 1
+#define LIBSPDM_ENABLE_CAPABILITY_CHUNK_CAP    1
+
+/* Data sizes */
+#define LIBSPDM_MAX_CERT_CHAIN_SIZE         65536
+#define LIBSPDM_MAX_MEASUREMENT_RECORD_SIZE 65536
+```
+
+**Responder HAL libraries** — Implement the following in your platform layer:
+
+| Library | When required |
+|---------|---------------|
+| `watchdoglib` | Always — resets the watchdog during long SPDM operations |
+| `asymsignlib` | Signing (`CERT_CAP`) is enabled — implement in a secure environment |
+| `psklib` | PSK exchange is enabled — implement in a secure environment |
+| `measlib` | Measurements (`MEAS_CAP`) are supported |
+| `csrlib` | CSR signing (`CSR_CAP`) is supported — implement in a secure environment |
+| `setcertlib` | Certificate chain setting (`SET_CERT_CAP`) is supported |
+
+If SPDM session key confidentiality is required, implement `spdm_secured_message_lib` in a
+secure environment.
+
+**Crypto backend** — Choose either the OpenSSL wrapper (`cryptlib_openssl`) or the Mbed TLS
+wrapper (`cryptlib_mbedtls`). If the device has no real-time clock, undefine
+`OPENSSL_CHECK_TIME` (OpenSSL) or `MBEDTLS_HAVE_TIME_DATE` (Mbed TLS). See
+[Cryptography](/guides/cryptography) for per-backend algorithm limitations.
+
+**Transport** — Choose at least one transport library: `spdm_transport_mctp_lib` for MCTP
+or `spdm_transport_pcidoe_lib` for PCI DOE. See [Transport Layers](/guides/transport-layers).
+
+Implement `libspdm_device_send_message_func` and `libspdm_device_receive_message_func` per
+`spdm_common_lib.h`.
+
+</Step>
+
+<Step title="Initialize context">
+
+Allocate and initialize the SPDM context, then set up the scratch buffer.
+
+```c
+spdm_context = (void *)malloc(libspdm_get_context_size());
+libspdm_init_context(spdm_context);
+
+scratch_buffer_size = libspdm_get_sizeof_required_scratch_buffer(m_spdm_context);
+scratch_buffer = (void *)malloc(scratch_buffer_size);
+libspdm_set_scratch_buffer(spdm_context, m_scratch_buffer, scratch_buffer_size);
+```
+
+The scratch buffer size depends on `LIBSPDM_ENABLE_CAPABILITY_CHUNK_CAP` and
+`LIBSPDM_RESPOND_IF_READY_SUPPORT`. You can also calculate it from the `max_spdm_msg_size`
+passed to `libspdm_register_transport_layer_func()` using `libspdm_get_scratch_buffer_capacity()`.
+
+To isolate session keys in a separate secure memory region, use the variant initialization:
+
+```c
+spdm_secured_context_size = libspdm_secured_message_get_context_size();
+spdm_secured_contexts[0] = (void *)pointer_to_secured_memory_0;
+spdm_secured_contexts[1] = (void *)pointer_to_secured_memory_1;
+/* ... one entry per session ... */
+spdm_secured_contexts[num_sessions] = (void *)pointer_to_secured_memory_num_sessions;
+
+spdm_context = (void *)malloc(libspdm_get_context_size_without_secured_context());
+libspdm_init_context_with_secured_context(spdm_context, spdm_secured_contexts, num_sessions);
+```
+
+<Note>
+Both `spdm_context` and `scratch_buffer` may contain session keys or decrypted secured
+message content. Zero both buffers before freeing or reusing them.
+</Note>
+
+</Step>
+
+<Step title="Register callbacks">
+
+Register the device I/O functions, transport layer, and device buffer functions.
+
+```c
+libspdm_register_device_io_func(
+    spdm_context,
+    spdm_device_send_message,
+    spdm_device_receive_message);
+
+libspdm_register_transport_layer_func(
+    spdm_context,
+    LIBSPDM_MAX_SPDM_MSG_SIZE,          /* defined by the Integrator */
+    LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE,
+    LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE,
+    libspdm_transport_mctp_encode_message,
+    libspdm_transport_mctp_decode_message);
+
+libspdm_register_device_buffer_func(
+    spdm_context,
+    LIBSPDM_SENDER_BUFFER_SIZE,         /* defined by the Integrator */
+    LIBSPDM_RECEIVER_BUFFER_SIZE,       /* defined by the Integrator */
+    spdm_device_acquire_sender_buffer,
+    spdm_device_release_sender_buffer,
+    spdm_device_acquire_receiver_buffer,
+    spdm_device_release_receiver_buffer);
+```
+
+Replace the MCTP constants and encode/decode functions with their PCI DOE equivalents when
+using that transport. See [Transport Layers](/guides/transport-layers).
+
+</Step>
+
+<Step title="Set capabilities, algorithms, and deploy certificate chain">
+
+Configure the Responder's capabilities, preferred algorithms, and the certificate chain to
+present during authentication.
+
+```c
+parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+
+libspdm_set_data(spdm_context, LIBSPDM_DATA_CAPABILITY_CT_EXPONENT,
+                 &parameter, &ct_exponent, sizeof(ct_exponent));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_CAPABILITY_FLAGS,
+                 &parameter, &cap_flags, sizeof(cap_flags));
+
+libspdm_set_data(spdm_context, LIBSPDM_DATA_MEASUREMENT_SPEC,
+                 &parameter, &measurement_spec, sizeof(measurement_spec));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_MEASUREMENT_HASH_ALGO,
+                 &parameter, &measurement_hash_algo, sizeof(measurement_hash_algo));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_BASE_ASYM_ALGO,
+                 &parameter, &base_asym_algo, sizeof(base_asym_algo));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_BASE_HASH_ALGO,
+                 &parameter, &base_hash_algo, sizeof(base_hash_algo));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_DHE_NAME_GROUP,
+                 &parameter, &dhe_named_group, sizeof(dhe_named_group));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_AEAD_CIPHER_SUITE,
+                 &parameter, &aead_cipher_suite, sizeof(aead_cipher_suite));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_REQ_BASE_ASYM_ALG,
+                 &parameter, &req_base_asym_alg, sizeof(req_base_asym_alg));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_KEY_SCHEDULE,
+                 &parameter, &key_schedule, sizeof(key_schedule));
+```
+
+Deploy the Responder's certificate chain into the desired slot:
+
+```c
+parameter.additional_data[0] = slot_id;
+libspdm_set_data(spdm_context, LIBSPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN,
+                 &parameter, my_public_cert_chains, my_public_cert_chains_size);
+```
+
+</Step>
+
+<Step title="Dispatch messages loop">
+
+The Responder processes incoming requests by calling `libspdm_responder_dispatch_message`
+in a loop. The function receives the request, routes it to the correct handler, and sends
+the response.
+
+```c
+while (true) {
+    status = libspdm_responder_dispatch_message(m_spdm_context);
+    if (status != RETURN_UNSUPPORTED) {
+        continue;
+    }
+    /* handle non-SPDM message */
+}
+```
+
+When `libspdm_responder_dispatch_message` returns `RETURN_UNSUPPORTED`, the received
+message is not an SPDM message and must be handled by the application layer.
+
+</Step>
+
+<Step title="Register application message callback">
+
+To handle transport layer application messages or any SPDM messages not processed by the
+default dispatch, register a `libspdm_get_response_func` callback via
+`libspdm_register_get_response_func`.
+
+```c
+libspdm_return_t libspdm_get_response(
+    void           *spdm_context,
+    const uint32_t *session_id,
+    bool            is_app_message,
+    size_t          request_size,
+    const void     *request,
+    size_t         *response_size,
+    void           *response)
+{
+    if (is_app_message) {
+        /* handle transport layer application message */
+    } else {
+        /* handle other SPDM message */
+    }
+    return LIBSPDM_STATUS_SUCCESS;
+}
+
+libspdm_register_get_response_func(spdm_context, libspdm_get_response);
+```
+
+`session_id` is `NULL` for unprotected messages and non-`NULL` for messages inside a
+secured session.
+
+To handle SPDM Vendor Defined Commands, register a separate vendor callback:
+
+```c
+libspdm_return_t libspdm_vendor_response_func(
+    void           *spdm_context,
+    const uint32_t *session_id,
+    uint16_t        req_standard_id,
+    uint8_t         req_vendor_id_len,
+    const void     *req_vendor_id,
+    uint32_t        req_size,
+    const void     *req_data,
+    uint32_t       *resp_size,
+    void           *resp_data)
+{
+    /* write payload to resp_data and set *resp_size to payload size */
+    return LIBSPDM_STATUS_SUCCESS;
+}
+
+libspdm_register_vendor_callback_func(spdm_context, libspdm_vendor_response_func);
+```
+
+</Step>
+
+<Step title="Cleanup">
+
+Release internal resources allocated by libspdm. This function does not free the
+`spdm_context` buffer itself.
+
+```c
+libspdm_deinit_context(spdm_context);
+```
+
+<Note>
+Zero both `spdm_context` and `scratch_buffer` before calling `free()`. These buffers may
+contain residual session key material or decrypted secured message content.
+</Note>
+
+</Step>
+
+</Steps>

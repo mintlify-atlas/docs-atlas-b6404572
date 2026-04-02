@@ -1,97 +1,65 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "libspdm"
+description: "DMTF's reference implementation of the Security Protocol and Data Model (SPDM) — a C library for building SPDM Requesters and Responders in embedded and systems environments."
 ---
 
-## Setting up
+libspdm provides everything you need to implement SPDM-based device authentication, attestation, and secure communication in firmware, drivers, and embedded systems. It supports SPDM specifications 1.0 through 1.4 and runs without dynamic memory allocation, making it suitable for resource-constrained environments.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Learn what libspdm is, what problems it solves, and where it fits in your system.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Build libspdm and run your first SPDM Requester in minutes.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Integration Guide" icon="plug" href="/guides/requester">
+    Step-by-step guidance for integrating libspdm as a Requester or Responder.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api/common">
+    Complete reference for all public API functions, parameters, and return values.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What is SPDM?
 
-Everything you need to create world-class documentation.
+The Security Protocol and Data Model (SPDM) is a DMTF standard (DSP0274) that enables authenticated communication between hardware components. It provides:
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+- **Device authentication** — verify the identity of a device using certificates
+- **Attestation** — retrieve and verify signed measurements of device firmware and configuration
+- **Secure sessions** — establish encrypted channels between Requester and Responder endpoints
 
-## Need inspiration?
+libspdm implements both sides of the protocol — the **Requester** (initiates requests) and the **Responder** (handles requests and provides measurements/certificates).
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+## Key capabilities
+
+<CardGroup cols={2}>
+  <Card title="SPDM 1.0–1.4 support" icon="shield-check">
+    Implements GET_VERSION, GET_CAPABILITIES, CHALLENGE, GET_MEASUREMENTS, KEY_EXCHANGE, and more.
+  </Card>
+  <Card title="Post-quantum cryptography" icon="lock">
+    Supports ML-DSA, SLH-DSA, and ML-KEM alongside traditional RSA, ECDSA, and ECDHE.
+  </Card>
+  <Card title="Multiple transports" icon="network-wired">
+    Built-in support for MCTP, PCI DOE, Storage, and TCP transport bindings.
+  </Card>
+  <Card title="Embedded-friendly" icon="microchip">
+    No dynamic memory allocation. Uses only C99 freestanding headers. Runs on ARM, RISC-V, and more.
+  </Card>
+</CardGroup>
+
+## Get started
+
+<Steps>
+  <Step title="Build the library">
+    Clone the repository, initialize submodules, and build with CMake. See the [build guide](/build) for all platform and toolchain options.
+  </Step>
+  <Step title="Initialize an SPDM context">
+    Allocate and initialize an `spdm_context`, register device I/O callbacks, and configure capabilities and algorithms.
+  </Step>
+  <Step title="Connect and authenticate">
+    Call `libspdm_init_connection` to negotiate version and capabilities, then use `libspdm_get_digest`, `libspdm_get_certificate`, and `libspdm_challenge` to authenticate the peer.
+  </Step>
+  <Step title="Retrieve measurements or start a session">
+    Use `libspdm_get_measurement` for attestation, or `libspdm_start_session` to establish an encrypted SPDM session.
+  </Step>
+</Steps>

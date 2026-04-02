@@ -1,0 +1,234 @@
+---
+title: "Programming Environment"
+description: "libspdm's C99 environment requirements, compiler assumptions, assertion philosophy, configuration macros, and memory model."
+---
+
+## C99 Freestanding Environment
+
+The core libraries in `libspdm/library` conform to the **C99 standard** and use only the following freestanding headers:
+
+```c
+#include <stdint.h>   // fixed-width integer types: uint8_t, uint32_t, etc.
+#include <stdbool.h>  // bool, true, false
+#include <stddef.h>   // size_t, NULL, offsetof
+```
+
+Using only freestanding headers means the core libraries carry **no dependency on a hosted C library** (`libc`, POSIX, Win32, etc.). They are suitable for bare-metal embedded targets, UEFI, hypervisors, and any other environment without a full operating system.
+
+Any functionality beyond these headers — memory operations, cryptography, debug output, timers — is provided through the HAL layer (`libspdm/include/hal/library`) and implemented either by `libspdm/os_stub` or by the integrator.
+
+### Overriding the Standard Headers
+
+If your compiler does not provide one of these headers, or if you need to substitute your own definitions, override them with the corresponding macro before including any libspdm header:
+
+```c
+// Point libspdm at your own stdint.h replacement
+#define LIBSPDM_STDINT_ALT   "my_platform/my_stdint.h"
+
+// Point libspdm at your own stdbool.h replacement
+#define LIBSPDM_STDBOOL_ALT  "my_platform/my_stdbool.h"
+
+// Point libspdm at your own stddef.h replacement
+#define LIBSPDM_STDDEF_ALT   "my_platform/my_stddef.h"
+```
+
+Each macro, when defined, causes libspdm to `#include` that path instead of the standard header.
+
+---
+
+## Core Library Assumptions
+
+libspdm makes the following assumptions about the compiler, target hardware, and execution environment. Platforms that do not satisfy these assumptions are not supported.
+
+| Assumption | Detail |
+|---|---|
+| **Endianness** | Target architecture is little-endian. SPDM messages use little-endian wire encoding. |
+| **Word size** | Target is a 32-bit or 64-bit system. |
+| **Packing** | Compiler supports `#pragma pack()` for packed struct definitions used in SPDM message layouts. |
+| **NULL pointer** | A pointer `memset` to `0` compares equal to `NULL`. In other words, `NULL == (void *)0`. |
+| **Character encoding** | Characters are ASCII — for example, `('A' == 65)` evaluates to `1` (true). |
+
+<Note>
+  libspdm does not support big-endian targets. SPDM multi-byte fields are defined as little-endian on the wire, so byte-swapping would be required throughout the message layer.
+</Note>
+
+---
+
+## Assertion Philosophy
+
+libspdm uses the `LIBSPDM_ASSERT` macro throughout its codebase to document internal assumptions and validate integrator usage.
+
+```c
+// Example from libspdm internals:
+LIBSPDM_ASSERT(spdm_context != NULL);
+LIBSPDM_ASSERT(slot_id < SPDM_MAX_SLOT_COUNT);
+```
+
+### When Assertions Fire
+
+An assertion failure always indicates one of:
+
+1. **A bug in libspdm** — an internal invariant was violated.
+2. **Misuse of the public API** by the integrator — for example, calling a Requester function before the connection state is ready.
+3. **Misconfiguration of the SPDM endpoint** by the integrator — for example, registering inconsistent buffer sizes.
+
+**An assertion will never fire because of an SPDM message received from a peer.** Messages from peer endpoints are treated as untrusted input and are validated through ordinary error-return paths, not assertions.
+
+### Removing Assertions
+
+Assertions can be compiled out entirely to reduce code size in production builds. The mechanism for doing this is controlled by the HAL `debuglib` implementation — a no-op `LIBSPDM_ASSERT` in `debuglib.h` will eliminate all assertion overhead.
+
+### Compile-Time Configuration Checks
+
+Setting `LIBSPDM_CHECK_MACRO` causes libspdm to validate configuration macros at compile time:
+
+```c
+#define LIBSPDM_CHECK_MACRO 1
+```
+
+When enabled, libspdm uses `LIBSPDM_CHECK_MACRO` together with `static_assert` equivalents to catch invalid configuration combinations during the build, before any code runs.
+
+---
+
+## Configuration Macros
+
+libspdm's feature set and limits are controlled by configuration macros defined in `spdm_lib_config.h`. The macros are grouped into three categories.
+
+### Cryptography Support
+
+Controls which algorithms are compiled in. Disabling an algorithm removes its code and reduces binary size.
+
+```c
+// Asymmetric signature algorithms
+#define LIBSPDM_RSA_SSA_2048_SUPPORT    1
+#define LIBSPDM_RSA_SSA_3072_SUPPORT    1
+#define LIBSPDM_RSA_PSS_2048_SUPPORT    1
+#define LIBSPDM_ECDSA_P256_SUPPORT      1
+#define LIBSPDM_ECDSA_P384_SUPPORT      1
+
+// Key exchange (DHE) algorithms
+#define LIBSPDM_ECDHE_P256_SUPPORT      1
+#define LIBSPDM_ECDHE_P384_SUPPORT      1
+#define LIBSPDM_FFDHE_2048_SUPPORT      1
+
+// AEAD algorithms
+#define LIBSPDM_AEAD_AES_128_GCM_SUPPORT     1
+#define LIBSPDM_AEAD_AES_256_GCM_SUPPORT     1
+#define LIBSPDM_AEAD_CHACHA20_POLY1305_SUPPORT 1
+```
+
+### Capability Flags
+
+Enables or disables SPDM protocol capabilities at compile time.
+
+```c
+// PSK (pre-shared key) session support
+#define LIBSPDM_ENABLE_CAPABILITY_PSK_CAP           1
+
+// Mutual authentication support
+#define LIBSPDM_ENABLE_CAPABILITY_MUT_AUTH_CAP      1
+
+// Measurement capability
+#define LIBSPDM_ENABLE_CAPABILITY_MEAS_CAP          1
+
+// Certificate management (GET_CSR, SET_CERTIFICATE)
+#define LIBSPDM_ENABLE_CAPABILITY_SET_CERT_CAP      1
+
+// Chunked transfer (CHUNK_SEND / CHUNK_GET)
+#define LIBSPDM_ENABLE_CHUNK_CAP                    1
+```
+
+### Data Size Limits
+
+Controls the maximum sizes of buffers and data structures. These values directly affect the memory footprint of the `spdm_context` and associated scratch buffers.
+
+```c
+// Maximum certificate chain size (bytes)
+#define LIBSPDM_MAX_CERT_CHAIN_SIZE            65536
+
+// Maximum certificate chain block size per GET_CERTIFICATE response
+#define LIBSPDM_MAX_CERT_CHAIN_BLOCK_LEN       1024
+
+// Maximum number of measurement blocks
+#define LIBSPDM_MAX_MEASUREMENT_BLOCK_COUNT    8
+
+// Maximum session count
+#define LIBSPDM_MAX_SESSION_COUNT              4
+
+// Maximum size of a single SPDM message
+#define LIBSPDM_MAX_MESSAGE_BUFFER_SIZE        4096
+```
+
+### Overriding the Default Configuration
+
+To substitute your own configuration header, define `LIBSPDM_CONFIG` to the path of your file before building:
+
+```c
+// In your build system (CMake, Makefile, etc.):
+// -DLIBSPDM_CONFIG="my_project/libspdm_config.h"
+```
+
+When `LIBSPDM_CONFIG` is defined, libspdm includes that file instead of the default `spdm_lib_config.h`. Your header should define all required macros; any macro not defined will fall back to the libspdm default.
+
+```c
+// my_project/libspdm_config.h — minimal embedded profile
+#define LIBSPDM_RSA_SSA_2048_SUPPORT            0
+#define LIBSPDM_ECDSA_P256_SUPPORT              1
+#define LIBSPDM_ECDHE_P256_SUPPORT              1
+#define LIBSPDM_AEAD_AES_128_GCM_SUPPORT        1
+#define LIBSPDM_ENABLE_CAPABILITY_PSK_CAP       0
+#define LIBSPDM_MAX_CERT_CHAIN_SIZE             4096
+#define LIBSPDM_MAX_SESSION_COUNT               1
+```
+
+---
+
+## Memory Model
+
+libspdm never calls `malloc`, `calloc`, or `free`. All memory is owned and managed by the integrator.
+
+### `spdm_context`
+
+The `spdm_context` structure holds all state for a single SPDM connection. The integrator allocates it — typically as a static variable or from a fixed pool — and passes a pointer into every libspdm API call.
+
+```c
+// Determine the required allocation size at runtime
+size_t context_size = libspdm_get_context_size();
+void  *spdm_context = allocate_pool(context_size);  // your allocator
+
+libspdm_init_context(spdm_context);
+```
+
+The context includes:
+- Negotiated connection parameters (version, capabilities, algorithms).
+- Certificate chain data for each populated slot.
+- Session state for each active session (up to `LIBSPDM_MAX_SESSION_COUNT`).
+- Internal transcript buffers used for cryptographic binding.
+
+### Scratch Buffer
+
+The scratch buffer is used to hold **plaintext during secured message processing**. When a session message arrives, ciphertext is in the receiver buffer and the decrypted plaintext is written to the scratch buffer. The SPDM application layer payload is then a pointer into the scratch buffer.
+
+```c
+// Determine scratch buffer size
+size_t scratch_size = libspdm_get_sizeof_required_scratch_buffer(spdm_context);
+void  *scratch      = allocate_pool(scratch_size);
+
+libspdm_set_scratch_buffer(spdm_context, scratch, scratch_size);
+```
+
+### Placing Session Keys in Secure Memory
+
+Session keys are managed by `spdm_secured_message_lib`. If your platform has a **secure memory region** (e.g., a TEE, secure enclave, or memory protected by IOMMU/MPU), you can deploy `spdm_secured_message_lib` in that environment and allocate its secured message context from secure memory:
+
+```c
+// Allocate the secured message context from secure memory
+size_t secured_ctx_size = libspdm_secured_message_get_context_size();
+void  *secured_context  = allocate_secure_pool(secured_ctx_size);
+```
+
+Session keys stored in secure memory are never visible to code running outside the secure environment, even though the SPDM message buffers themselves may pass through normal memory.
+
+<Info>
+  The scratch buffer may also contain sensitive plaintext. Integrators with strict security requirements should allocate the scratch buffer from secure memory, or zeroize it after each use.
+</Info>

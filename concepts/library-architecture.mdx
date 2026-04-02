@@ -1,0 +1,239 @@
+---
+title: "Library Architecture"
+description: "An overview of libspdm's layered library design — how the SPDM, secured message, cryptography, transport, and device I/O layers fit together."
+---
+
+## Overview
+
+libspdm is structured as a set of composable, statically-linked libraries arranged in layers. Each layer has a defined responsibility and a clean interface boundary. Integrators link only the layers they need and implement the layers the library cannot provide (device I/O, secrets, transport).
+
+The guiding principles behind the design are:
+
+- **Static linking** is used when there is exactly one possible implementation — for example, the cryptography engine. The library is linked directly.
+- **Dynamic linking (function registration)** is used when there are multiple possible implementations — for example, the transport layer. The integrator registers function pointers at runtime via the appropriate `libspdm_register_*` API.
+
+---
+
+## Layer Diagram
+
+The following ASCII diagram from `doc/design.md` shows the complete library stack:
+
+```
+     +================+               +================+
+     | SPDM Requester |               | SPDM Responder |
+     | Device Driver  |               | Device Driver  |
+     +================+               +================+
+            | spdm_send_receive_data            ^ spdm_get_response_func
+ =============================================================
+            V                                   |
+ +------------------+  +---------------+  +------------------+
+ |spdm_requester_lib|->|spdm_common_lib|<-|spdm_responder_lib|
+ +------------------+  +---------------+  +------------------+
+       | | |            |    |      V              | | |
+       | | |            |    |  +-----------+      | | |
+       | | |            |    |  |asymsignlib|      | | |   // HAL: Device Secret (PrivateKey)
+       | | |            |    V  +-----------+      | | |
+       | | |            |  +--------------+        | | |
+       | | |            |  |spdm_crypt_lib|        | | |   // SPDM-related crypto
+       | | |            V  +--------------+        | | |
+       | | |      +------------------------+       | | |
+       | |  ----->|spdm_secured_message_lib|<------  | |   // DSP0277 - Secured Message
+       | |        +------------------------+         | |
+       | |                     ^      V              | |
+       | |                     |  +--------+         | |
+       | |                     |  | psklib |         | |   // HAL: Device Secret (PSK)
+       | |                     |  +--------+         | |
+ =============================================================
+       | |                     |                     | |
+       | |         +----------------------+          | |
+       |  -------->|spdm_transport_xxx_lib|<---------  |   // MCTP / PCI DOE framing
+       |           | (XXX = mctp, pcidoe) |            |
+       |           +----------------------+            |
+       |   spdm_transport_encode/decode_message_func   |
+       |                                               |
+ =============================================================
+       |                                               |
+       |     spdm_device_send/receive_message_func     |
+       |              +----------------+               |
+        ------------->| SPDM Device IO |<--------------
+                      | (SMBus, PciDoe)|
+                      +----------------+
+```
+
+Horizontal lines mark the three integration boundaries: between the SPDM core and transport, and between the transport and device I/O.
+
+---
+
+## Library Layer Reference
+
+### `spdm_requester_lib`
+
+Implements the Requester side of the DSP0274 SPDM protocol. Contains the logic for sending each request message (`GET_VERSION`, `CHALLENGE`, `KEY_EXCHANGE`, etc.) and processing the corresponding responses.
+
+Link this library into any component that acts as an SPDM Requester.
+
+### `spdm_responder_lib`
+
+Implements the Responder side of DSP0274. Contains the dispatch logic (`spdm_get_response_func`) that receives a request buffer, identifies the message type, and produces the appropriate response.
+
+Link this library into any component that acts as an SPDM Responder.
+
+### `spdm_common_lib`
+
+Shared services consumed by both `spdm_requester_lib` and `spdm_responder_lib`. Responsibilities include:
+
+- Allocating and managing the `spdm_context` structure that holds all connection state.
+- `libspdm_set_data` / `libspdm_get_data`: reading and writing configuration and negotiated parameters.
+- Connection state machine tracking (`LIBSPDM_DATA_CONNECTION_STATE`).
+- Registration of transport layer functions and device I/O callbacks.
+
+### `spdm_secured_message_lib`
+
+Implements [DSP0277](https://www.dmtf.org/dsp/DSP0277) — Secured Messages using SPDM. Responsibilities:
+
+- Session key generation (transcript hashing, HKDF-based key derivation).
+- AEAD encryption and decryption of session messages.
+- Sequence number tracking per session.
+
+<Info>
+  `spdm_secured_message_lib` can be deployed in a **secure enclave or trusted execution environment** if session keys are considered secrets that must not be visible to the rest of the system. The library communicates with the rest of libspdm through well-defined buffer interfaces.
+</Info>
+
+### `spdm_crypt_lib`
+
+SPDM-specific cryptographic operations that sit above the HAL `cryptlib`. Examples include:
+
+- Signature generation and verification using negotiated asymmetric algorithms.
+- Hash computation over SPDM transcripts.
+- Key exchange ephemeral key generation.
+
+This library is statically linked — there is one cryptographic backend per build.
+
+### `spdm_transport_mctp_lib` / `spdm_transport_pcidoe_lib`
+
+Transport framing libraries. Each provides:
+
+- `encode_message`: wraps an SPDM message buffer with the transport header and tail.
+- `decode_message`: strips the transport framing and returns a pointer to the SPDM payload.
+
+The Requester or Responder registers these functions via `libspdm_register_transport_layer_func`, along with the header/tail sizes and maximum message size for that transport. Because multiple transports can exist, these are registered dynamically (function pointers), not statically linked.
+
+### Device I/O Layer
+
+The bottom layer is implemented entirely by the integrator. It connects libspdm to the actual hardware bus.
+
+Integrators register two pairs of functions:
+
+```c
+// Registered via libspdm_register_device_io_func
+libspdm_device_send_message_func     // send a transport-framed message
+libspdm_device_receive_message_func  // receive a transport-framed message
+
+// Registered via libspdm_register_device_buffer_func
+libspdm_device_acquire_sender_buffer_func
+libspdm_device_release_sender_buffer_func
+libspdm_device_acquire_receiver_buffer_func
+libspdm_device_release_receiver_buffer_func
+```
+
+---
+
+## HAL Library Layer
+
+libspdm depends on a Hardware Abstraction Layer (HAL) for functionality that varies by platform. Sample implementations live in `os_stub/`.
+
+| HAL Library | Purpose |
+|---|---|
+| `cryptlib` | Cryptographic primitives: hash, HMAC, asymmetric sign/verify, AEAD, RNG |
+| `memlib` | Memory operations: `memcpy`, `memset`, `memcmp` |
+| `debuglib` | Debug output and assertion handling |
+| **Requester HAL** | |
+| `timelib` | Sleep function for Requester timeout handling |
+| `reqasymsignlib` | Private key signing in a secure environment (Requester mutual auth) |
+| `psklib` (requester) | PSK HMAC operation in a secure environment |
+| **Responder HAL** | |
+| `watchdoglib` | Watchdog reset during long Responder operations |
+| `asymsignlib` | Private key signing in a secure environment (Responder auth) |
+| `psklib` (responder) | PSK HMAC operation in a secure environment |
+| `measlib` | Measurement collection — provides measurement blocks to the Responder |
+| `csrlib` | Certificate Signing Request generation |
+| `setcertlib` | Writing a new certificate chain to a slot |
+
+The signing HAL libraries (`asymsignlib`, `reqasymsignlib`) are intentionally separated from the rest of the stack so that private keys can be held in a secure environment (TPM, TEE, HSM) and never exposed to the SPDM library itself.
+
+---
+
+## Buffer Model
+
+libspdm uses three named buffers. All buffers are allocated by the integrator — libspdm never calls `malloc`.
+
+### Sender Buffer
+
+Holds the outgoing transport-framed message. The SPDM message is built inside the sender buffer, leaving room for the transport header and tail:
+
+```
+|<---                    sender_buffer_size                    --->|
+      |<---       transport_message_buffer_size          --->|
+|<-transport_header_size->|<-spdm_message_buffer_size->|<-tail->|
++-----+-------------------+============================+--------+--+
+|     | transport header  |       SPDM message         |  tail  |  |
++-----+-------------------+============================+--------+--+
+```
+
+### Receiver Buffer
+
+Holds the incoming transport-framed message. After `transport_decode_message`, a pointer into the buffer identifies the SPDM payload:
+
+```
+|<---                  receiver_buffer_size               --->|
+   |<---        transport_message_buffer_size         --->|
+                    |<-spdm_message_buffer_size->|
++--+----------------+============================+-------+---+
+|  | transport hdr  |       SPDM message         | tail  |   |
++--+----------------+============================+-------+---+
+```
+
+### Scratch Buffer
+
+Used for plaintext during secured message processing. When a session is active, ciphertext lives in the sender/receiver buffer while the decrypted plaintext is written to the scratch buffer:
+
+```
+|<---                    scratch_buffer_size                    --->|
+                                   |<--   plain text size   -->|
+                                          |<-app_msg->|
+|<---      transport_header_size      --->|<-spdm msg->|<-tail->|
++------------------------------------------+==========+--------+--+
+|                                          | SPDM msg | Random |  |
++------------------------------------------+==========+--------+--+
+```
+
+**Key buffer properties:**
+
+- libspdm never writes to the receive buffer — it may be mapped read-only.
+- libspdm releases the sender buffer before acquiring the receiver buffer (and vice versa), so the two buffers may overlap or be the same allocation.
+- The scratch buffer size can be computed at runtime via `libspdm_get_sizeof_required_scratch_buffer` or statically via `libspdm_get_scratch_buffer_capacity`.
+- Integrators must ensure buffers cannot be tampered with while libspdm holds them. If buffers contain data that should not be shared with libspdm, zeroize them before granting access.
+
+---
+
+## No Dynamic Memory Allocation
+
+libspdm contains **no calls to `malloc`, `calloc`, or `free`**. All memory is owned by the integrator:
+
+- The `spdm_context` structure is allocated by the integrator (size determined by `libspdm_get_context_size()`).
+- Sender, receiver, and scratch buffers are allocated by the integrator and registered via the buffer callback API.
+- Statically allocated memory within libspdm is read-only.
+
+This design makes libspdm suitable for bare-metal, RTOS, and other environments without a heap.
+
+<CardGroup cols={2}>
+  <Card title="Requester Integration Guide" href="/guides/requester">
+    How to link and initialize the Requester libraries, register callbacks, and drive the SPDM flow.
+  </Card>
+  <Card title="Responder Integration Guide" href="/guides/responder">
+    How to link and initialize the Responder libraries, register callbacks, and handle incoming requests.
+  </Card>
+  <Card title="Transport Layers" href="/guides/transport-layers">
+    How to register MCTP or PCI DOE transport functions, and how to implement a custom transport binding.
+  </Card>
+</CardGroup>

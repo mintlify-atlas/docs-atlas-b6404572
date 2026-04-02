@@ -1,0 +1,98 @@
+---
+title: "Introduction"
+description: "libspdm is DMTF's open-source reference implementation of the Security Protocol and Data Model (SPDM) specification, written in C for embedded and systems programming environments."
+---
+
+## What is libspdm?
+
+libspdm is a C library and the official DMTF reference implementation of the Security Protocol and Data Model (SPDM) specification. It provides a complete, portable implementation of SPDM versions 1.0 through 1.4 suitable for use in firmware, BIOS/UEFI, device drivers, and embedded systems.
+
+The core libraries in `libspdm/library` require only C99 freestanding headers, making them appropriate for constrained and bare-metal environments. All statically allocated memory in the core libraries is read-only, and the core libraries do not dynamically allocate memory. Any functionality beyond the C99 freestanding headers is provided by `libspdm/os_stub` or by the library's Integrator.
+
+## What problems does it solve?
+
+Modern hardware platforms require a standardized mechanism for:
+
+- **Device authentication** — cryptographically verifying the identity of hardware components using X.509 certificate chains or raw public keys
+- **Firmware attestation** — retrieving signed measurements of device firmware and configuration to detect tampering
+- **Secure sessions** — establishing encrypted, authenticated communication channels between system software and hardware devices
+- **Key management** — negotiating session keys, performing key updates, and managing pre-shared keys (PSK)
+
+Without a common protocol, each device vendor would implement its own proprietary authentication scheme, increasing integration complexity and security risk. SPDM standardizes these operations so that any SPDM Requester (e.g., a host driver or BMC) can securely communicate with any SPDM Responder (e.g., a NIC, GPU, or storage controller) using a consistent API.
+
+## Who uses libspdm?
+
+libspdm is designed for:
+
+- **Firmware engineers** building SPDM Responders in device firmware (PCIe cards, NVMe drives, BMCs)
+- **BIOS/UEFI developers** integrating device security into UEFI platform firmware via EDK2
+- **Device driver authors** adding SPDM attestation to Linux kernel drivers or hypervisor backends
+- **Platform security architects** integrating attestation flows into management controllers and trusted execution environments
+
+## Integration targets
+
+libspdm has been integrated into the following projects and environments:
+
+| Project | Description |
+|---------|-------------|
+| [EDKII](https://github.com/tianocore/edk2/tree/master/SecurityPkg/DeviceSecurity) | UEFI host environment — device security package |
+| [open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules) | NVIDIA Linux kernel module GPU driver |
+| [QEMU](https://gitlab.com/qemu-project/qemu/-/blob/master/docs/specs/spdm.rst) | QEMU SPDM backend server |
+| [OpenBMC](https://github.com/openbmc/spdm) | BMC firmware; exposes measurements and certificate chains via Redfish |
+| [TF-RMM](https://github.com/TF-RMM/tf-rmm) | ARM Trusted Firmware Realm Management Monitor |
+| [wolfSSL](https://www.wolfssl.com/wolfssl-libspdm-support) | wolfSSL TLS library integration |
+| [spdm-emu](https://github.com/DMTF/spdm-emu) | Full SPDM Requester/Responder emulator for testing |
+
+Language bindings are also available: [Java verifier](https://github.com/altera-opensource/verifier) and [Rust spdm-utils](https://github.com/westerndigitalcorporation/spdm-utils).
+
+## SPDM specifications implemented
+
+| Specification | Title | Versions |
+|---------------|-------|----------|
+| [DSP0274](https://www.dmtf.org/dsp/DSP0274) | Security Protocol and Data Model (SPDM) | 1.0.2, 1.1.4, 1.2.3, 1.3.2, 1.4.0 |
+| [DSP0277](https://www.dmtf.org/dsp/DSP0277) | Secured Messages using SPDM | 1.0.1, 1.1.1, 1.2.0 |
+| [DSP0275](https://www.dmtf.org/dsp/DSP0275) | SPDM over MCTP Binding | 1.0.2 |
+| [DSP0276](https://www.dmtf.org/dsp/DSP0276) | Secured Messages using SPDM over MCTP Binding | 1.2.0 |
+| [DSP0286](https://www.dmtf.org/dsp/DSP0286) | SPDM to Storage Binding | 1.0.0 |
+| [DSP0287](https://www.dmtf.org/dsp/DSP0287) | SPDM over TCP Binding | 1.0.0 |
+
+PCIe bindings follow the PCI Express Base Specification Revision 6.2. CXL bindings follow the Compute Express Link Specification Revision 3.1.
+
+## Implemented SPDM messages
+
+### SPDM 1.0
+
+`GET_VERSION`, `GET_CAPABILITIES`, `NEGOTIATE_ALGORITHMS`, `GET_DIGESTS`, `GET_CERTIFICATE`, `CHALLENGE`, `GET_MEASUREMENTS`, and `VENDOR_DEFINED_REQUEST`.
+
+### SPDM 1.1
+
+`KEY_EXCHANGE`, `FINISH`, `PSK_EXCHANGE`, `PSK_FINISH`, `END_SESSION`, `HEARTBEAT`, `KEY_UPDATE`, and `ENCAPSULATED` messages.
+
+### SPDM 1.2
+
+`GET_CSR`, `SET_CERTIFICATE`, `CHUNK_SEND`, and `CHUNK_GET`.
+
+### SPDM 1.3
+
+`GET_KEY_PAIR_INFO`, `SET_KEY_PAIR_INFO`, `SUBSCRIBE_EVENT_TYPE`, `GET_SUPPORTED_EVENT_TYPES`, `GET_ENDPOINT_INFO`, and `GET_MEASUREMENT_EXTENSION_LOG`.
+
+### SPDM 1.4
+
+Additional SPDM 1.4 messages will be implemented in future releases.
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Clone, build, and run your first SPDM connection in minutes.
+  </Card>
+  <Card title="Requester Guide" icon="arrow-right-arrow-left" href="/guides/requester">
+    Learn how to construct and configure an SPDM Requester.
+  </Card>
+  <Card title="Responder Guide" icon="server" href="/guides/responder">
+    Learn how to construct and configure an SPDM Responder.
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/common">
+    Browse the full libspdm C API reference.
+  </Card>
+</CardGroup>

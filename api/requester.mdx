@@ -1,0 +1,927 @@
+---
+title: "Requester API"
+description: "Functions for building an SPDM Requester: connection setup, authentication, measurements, and session management."
+---
+
+The Requester API covers the complete lifecycle of an SPDM Requester: establishing a connection, authenticating the Responder, retrieving certificates and measurements, and managing secure sessions. All functions return `libspdm_return_t`; `LIBSPDM_STATUS_SUCCESS` (zero) indicates success.
+
+Before calling any function in this section, initialize the SPDM context using the [Common API](/api/common).
+
+---
+
+## Connection Setup
+
+<Accordion title="libspdm_init_connection">
+
+Sends `GET_VERSION`, `GET_CAPABILITIES`, and `NEGOTIATE_ALGORITHMS` to establish an SPDM connection with a Responder.
+
+**Signature**
+```c
+libspdm_return_t libspdm_init_connection(
+    void *spdm_context,
+    bool get_version_only);
+```
+
+**Description**
+
+This is the first SPDM message exchange. Before calling this function, populate the context with the Requester's capabilities and supported algorithms via `libspdm_set_data`. After a successful return, query the peer's negotiated values using `libspdm_get_data` with `LIBSPDM_DATA_LOCATION_CONNECTION`.
+
+If this function returns a non-success status, the context should be reset before attempting a new connection.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="get_version_only" type="bool" required>
+  If `true`, only `GET_VERSION` is sent. If `false`, all three messages (`GET_VERSION`, `GET_CAPABILITIES`, `NEGOTIATE_ALGORITHMS`) are sent.
+</ParamField>
+
+**Return value**
+
+`LIBSPDM_STATUS_SUCCESS` on success. The context state will be `LIBSPDM_CONNECTION_STATE_NEGOTIATED`.
+
+```c
+libspdm_return_t status = libspdm_init_connection(spdm_context, false);
+if (status != LIBSPDM_STATUS_SUCCESS) {
+    /* reset context and retry */
+}
+```
+
+</Accordion>
+
+---
+
+## Certificate Management
+
+<Accordion title="libspdm_get_digest">
+
+Sends `GET_DIGESTS` to determine which certificate chain slots are populated and to retrieve the digest of each occupied slot.
+
+**Signature**
+```c
+libspdm_return_t libspdm_get_digest(
+    void *spdm_context,
+    const uint32_t *session_id,
+    uint8_t *slot_mask,
+    void *total_digest_buffer);
+```
+
+**Description**
+
+Call `libspdm_init_connection` before this function. The total size of `total_digest_buffer` must be at least `hash_size * popcount(slot_mask)` bytes, where `hash_size` is the negotiated base hash size.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="const uint32_t *">
+  If non-NULL, the message is sent inside the identified secure session. If NULL, the message is sent outside a session.
+</ParamField>
+
+<ParamField path="slot_mask" type="uint8_t *">
+  If non-NULL, receives a bitmask indicating which certificate chain slots are populated. Bit 0 corresponds to slot 0; bit 7 corresponds to slot 7.
+</ParamField>
+
+<ParamField path="total_digest_buffer" type="void *">
+  If non-NULL, receives the concatenated digests of all populated slots in slot-number order.
+</ParamField>
+
+**Return values**
+
+| Status | Description |
+|---|---|
+| `LIBSPDM_STATUS_SUCCESS` | `GET_DIGESTS` sent and `DIGESTS` received. |
+| `LIBSPDM_STATUS_INVALID_STATE_LOCAL` | Connection not in a valid state for this request. |
+| `LIBSPDM_STATUS_UNSUPPORTED_CAP` | `CERT_CAP` is not set on Requester or Responder. |
+| `LIBSPDM_STATUS_ERROR_PEER` | Responder returned an unexpected error. |
+| `LIBSPDM_STATUS_BUSY_PEER` | Responder continually returned Busy. |
+
+```c
+uint8_t slot_mask;
+uint8_t digest_buf[8 * LIBSPDM_MAX_HASH_SIZE];
+libspdm_get_digest(spdm_context, NULL, &slot_mask, digest_buf);
+```
+
+</Accordion>
+
+<Accordion title="libspdm_get_certificate">
+
+Sends `GET_CERTIFICATE` and retrieves a full certificate chain from the specified slot.
+
+**Signature**
+```c
+libspdm_return_t libspdm_get_certificate(
+    void *spdm_context,
+    const uint32_t *session_id,
+    uint8_t slot_id,
+    size_t *cert_chain_size,
+    void *cert_chain);
+```
+
+**Description**
+
+After retrieval, libspdm validates the certificate chain including the leaf certificate. Checks performed on the leaf certificate:
+- X.509 version is 3 (encoded as 2)
+- `CertificateSerialNumber`, `subject`, and `Issuer` fields are present
+- The asymmetric key algorithm matches the negotiated algorithm
+- `KeyUsage` is present and includes `digitalSignature`
+- If `BasicConstraints` is present, `cA` must be false
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="const uint32_t *">
+  Session context for the request. NULL for an unsecured request.
+</ParamField>
+
+<ParamField path="slot_id" type="uint8_t" required>
+  Certificate chain slot number (0–7).
+</ParamField>
+
+<ParamField path="cert_chain_size" type="size_t *" required>
+  On input: size of the `cert_chain` buffer (max `SPDM_MAX_CERTIFICATE_CHAIN_SIZE` = 65535 bytes). On output: actual size of the retrieved certificate chain.
+</ParamField>
+
+<ParamField path="cert_chain" type="void *" required>
+  Buffer to receive the certificate chain. The chain begins with an `spdm_cert_chain_t` header.
+</ParamField>
+
+**Return values**
+
+| Status | Description |
+|---|---|
+| `LIBSPDM_STATUS_SUCCESS` | Certificate chain retrieved and verified. |
+| `LIBSPDM_STATUS_VERIF_FAIL` | Certificate chain verification failed. |
+| `LIBSPDM_STATUS_INVALID_CERT` | Certificate parsing error or invalid field. |
+| `LIBSPDM_STATUS_CRYPTO_ERROR` | Generic cryptographic error. |
+| `LIBSPDM_STATUS_BUFFER_FULL` | Transcript buffer exhausted. |
+
+```c
+size_t cert_chain_size = 65535;
+uint8_t cert_chain[65535];
+libspdm_get_certificate(spdm_context, NULL, 0,
+                        &cert_chain_size, cert_chain);
+```
+
+</Accordion>
+
+<Accordion title="libspdm_get_certificate_ex">
+
+Extended variant of `libspdm_get_certificate` that allows the integrator to control the block size and retrieve the trust anchor.
+
+**Signature**
+```c
+libspdm_return_t libspdm_get_certificate_ex(
+    void *spdm_context,
+    const uint32_t *session_id,
+    uint8_t slot_id,
+    uint32_t length,
+    size_t *cert_chain_size,
+    void *cert_chain,
+    const void **trust_anchor,
+    size_t *trust_anchor_size);
+```
+
+**Description**
+
+Retrieves the certificate chain in blocks of `length` bytes. Verification follows the same chain as `libspdm_get_certificate`: `root_hash → Root Cert → Intermediate Cert(s) → Leaf Cert`. If a peer root certificate hash is deployed, the root certificate digest is validated against the deployed hash.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="const uint32_t *">
+  Session context. NULL for an unsecured request.
+</ParamField>
+
+<ParamField path="slot_id" type="uint8_t" required>
+  Certificate chain slot number (0–7).
+</ParamField>
+
+<ParamField path="length" type="uint32_t" required>
+  Block size in bytes. Pass `0` to use the default maximum block size.
+</ParamField>
+
+<ParamField path="cert_chain_size" type="size_t *" required>
+  On input: buffer capacity. On output: actual chain size.
+</ParamField>
+
+<ParamField path="cert_chain" type="void *" required>
+  Buffer to receive the certificate chain.
+</ParamField>
+
+<ParamField path="trust_anchor" type="const void **">
+  If non-NULL, receives a pointer to the trust anchor used to validate the chain. The pointer refers to memory owned by the context.
+</ParamField>
+
+<ParamField path="trust_anchor_size" type="size_t *">
+  If non-NULL, receives the size of the trust anchor in bytes.
+</ParamField>
+
+</Accordion>
+
+---
+
+## Authentication
+
+<Accordion title="libspdm_challenge">
+
+Sends `CHALLENGE` and verifies the `CHALLENGE_AUTH` signature to authenticate the Responder.
+
+**Signature**
+```c
+libspdm_return_t libspdm_challenge(
+    void *spdm_context,
+    void *reserved,
+    uint8_t slot_id,
+    uint8_t measurement_hash_type,
+    void *measurement_hash,
+    uint8_t *slot_mask);
+```
+
+**Description**
+
+Authenticates the Responder by verifying the signature over the message transcript. The transcript includes all `VCA` messages (`GET_VERSION`, `VERSION`, `GET_CAPABILITIES`, `CAPABILITIES`, `NEGOTIATE_ALGORITHMS`, `ALGORITHMS`) plus any `GET_DIGESTS`, `DIGESTS`, `GET_CERTIFICATE`, `CERTIFICATE` messages if they were issued, followed by `CHALLENGE` and `CHALLENGE_AUTH`.
+
+libspdm verifies the signature against the public key from the certificate retrieved in the specified slot.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="reserved" type="void *">
+  Reserved for future use (session ID). Pass NULL.
+</ParamField>
+
+<ParamField path="slot_id" type="uint8_t" required>
+  The certificate chain slot number identifying which key the Responder should sign with.
+</ParamField>
+
+<ParamField path="measurement_hash_type" type="uint8_t" required>
+  Type of measurement summary hash to include in `CHALLENGE_AUTH`. One of:
+  - `SPDM_CHALLENGE_REQUEST_NO_MEASUREMENT_SUMMARY_HASH` — No hash (required if Responder has no `MEAS_CAP`).
+  - `SPDM_CHALLENGE_REQUEST_TCB_COMPONENT_MEASUREMENT_HASH` — TCB measurements only.
+  - `SPDM_CHALLENGE_REQUEST_ALL_MEASUREMENTS_HASH` — All measurements.
+</ParamField>
+
+<ParamField path="measurement_hash" type="void *">
+  If non-NULL, receives the measurement summary hash. The buffer must be at least the negotiated hash size.
+</ParamField>
+
+<ParamField path="slot_mask" type="uint8_t *">
+  If non-NULL, receives the Responder's slot bitmask as returned in `CHALLENGE_AUTH`.
+</ParamField>
+
+**Return value**
+
+`LIBSPDM_STATUS_SUCCESS` when the `CHALLENGE_AUTH` signature is verified successfully. The connection state advances to `LIBSPDM_CONNECTION_STATE_AUTHENTICATED`.
+
+```c
+void *meas_hash = malloc(LIBSPDM_MAX_HASH_SIZE);
+uint8_t slot_mask;
+libspdm_challenge(spdm_context, NULL, 0,
+    SPDM_CHALLENGE_REQUEST_ALL_MEASUREMENTS_HASH,
+    meas_hash, &slot_mask);
+```
+
+</Accordion>
+
+---
+
+## Measurements
+
+<Accordion title="libspdm_get_measurement">
+
+Sends `GET_MEASUREMENTS` to retrieve measurement values from the Responder. Optionally requests and verifies a signature over the measurement data.
+
+**Signature**
+```c
+libspdm_return_t libspdm_get_measurement(
+    void *spdm_context,
+    const uint32_t *session_id,
+    uint8_t request_attribute,
+    uint8_t measurement_operation,
+    uint8_t slot_id,
+    uint8_t *content_changed,
+    uint8_t *number_of_blocks,
+    uint32_t *measurement_record_length,
+    void *measurement_record);
+```
+
+**Description**
+
+Issue this function multiple times to retrieve individual measurements or query the total count first. On each call without `GENERATE_SIGNATURE`, measurements may be returned without a signature. On the final call with `GENERATE_SIGNATURE`, the Responder signs all measurements returned so far.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="const uint32_t *">
+  Session context. NULL for an unsecured request.
+</ParamField>
+
+<ParamField path="request_attribute" type="uint8_t" required>
+  Bitmask of request directives:
+  - `SPDM_GET_MEASUREMENTS_REQUEST_ATTRIBUTES_GENERATE_SIGNATURE` — Request a signature from the Responder.
+  - `SPDM_GET_MEASUREMENTS_REQUEST_ATTRIBUTES_RAW_BIT_STREAM_REQUESTED` — Request raw bit stream measurements instead of hashes (SPDM 1.2+).
+</ParamField>
+
+<ParamField path="measurement_operation" type="uint8_t" required>
+  One of:
+  - `SPDM_GET_MEASUREMENTS_REQUEST_MEASUREMENT_OPERATION_TOTAL_NUMBER_OF_MEASUREMENTS` — Query the total number of blocks.
+  - `SPDM_GET_MEASUREMENTS_REQUEST_MEASUREMENT_OPERATION_ALL_MEASUREMENTS` — Retrieve all measurement blocks.
+  - A value `1`–`254` — Retrieve a single measurement block by index.
+</ParamField>
+
+<ParamField path="slot_id" type="uint8_t" required>
+  Certificate chain slot. Only used when `GENERATE_SIGNATURE` is set.
+</ParamField>
+
+<ParamField path="content_changed" type="uint8_t *">
+  (SPDM 1.2+) When `GENERATE_SIGNATURE` is set, indicates whether measurements changed since the last unsigned request. One of `SPDM_MEASUREMENTS_RESPONSE_CONTENT_CHANGE_*`.
+</ParamField>
+
+<ParamField path="number_of_blocks" type="uint8_t *" required>
+  Receives the number of measurement blocks in the response. For `TOTAL_NUMBER`, this is the total available. For `ALL_MEASUREMENTS`, this is the number returned.
+</ParamField>
+
+<ParamField path="measurement_record_length" type="uint32_t *" required>
+  On input: capacity of `measurement_record` in bytes. On output: actual bytes written.
+</ParamField>
+
+<ParamField path="measurement_record" type="void *" required>
+  Buffer to receive the measurement record data.
+</ParamField>
+
+```c
+/* Step 1: query total number of measurement blocks */
+uint8_t num_blocks;
+libspdm_get_measurement(spdm_context, NULL, 0,
+    SPDM_GET_MEASUREMENTS_REQUEST_MEASUREMENT_OPERATION_TOTAL_NUMBER_OF_MEASUREMENTS,
+    0, NULL, &num_blocks, NULL, NULL);
+
+/* Step 2: retrieve each block, signing the last one */
+for (uint8_t i = 1; i <= num_blocks; i++) {
+    uint8_t attr = (i == num_blocks)
+        ? SPDM_GET_MEASUREMENTS_REQUEST_ATTRIBUTES_GENERATE_SIGNATURE : 0;
+    uint32_t rec_len = sizeof(rec_buf);
+    uint8_t blk_count;
+    libspdm_get_measurement(spdm_context, NULL, attr, i, 0,
+                            NULL, &blk_count, &rec_len, rec_buf);
+}
+```
+
+</Accordion>
+
+---
+
+## Session Management
+
+<Accordion title="libspdm_start_session">
+
+Sends `KEY_EXCHANGE / FINISH` or `PSK_EXCHANGE / PSK_FINISH` to establish a secure session.
+
+**Signature**
+```c
+libspdm_return_t libspdm_start_session(
+    void *spdm_context,
+    bool use_psk,
+    const void *psk_hint,
+    uint16_t psk_hint_size,
+    uint8_t measurement_hash_type,
+    uint8_t slot_id,
+    uint8_t session_policy,
+    uint32_t *session_id,
+    uint8_t *heartbeat_period,
+    void *measurement_hash);
+```
+
+**Description**
+
+Establishes a cryptographically protected session. If the Responder requests mutual authentication, this function performs it automatically. Upon success, the returned `session_id` can be passed to other API calls to route messages through the session.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="use_psk" type="bool" required>
+  `false` to use `KEY_EXCHANGE` (asymmetric). `true` to use `PSK_EXCHANGE` (symmetric).
+</ParamField>
+
+<ParamField path="psk_hint" type="const void *">
+  PSK hint for `PSK_EXCHANGE`. Ignored when `use_psk` is `false`.
+</ParamField>
+
+<ParamField path="psk_hint_size" type="uint16_t">
+  Size of `psk_hint` in bytes.
+</ParamField>
+
+<ParamField path="measurement_hash_type" type="uint8_t" required>
+  Measurement summary hash type. One of `SPDM_CHALLENGE_REQUEST_NO_MEASUREMENT_SUMMARY_HASH`, `SPDM_CHALLENGE_REQUEST_TCB_COMPONENT_MEASUREMENT_HASH`, or `SPDM_CHALLENGE_REQUEST_ALL_MEASUREMENTS_HASH`.
+</ParamField>
+
+<ParamField path="slot_id" type="uint8_t" required>
+  Certificate chain slot to use for asymmetric key exchange. Ignored for PSK.
+</ParamField>
+
+<ParamField path="session_policy" type="uint8_t" required>
+  Session termination policy bitmask. `SPDM_KEY_EXCHANGE_REQUEST_SESSION_POLICY_TERMINATION_POLICY_RUNTIME_UPDATE` (SPDM 1.2+) controls whether the session is terminated if the Responder detects a measurement change.
+</ParamField>
+
+<ParamField path="session_id" type="uint32_t *" required>
+  Receives the session ID assigned to this session. Pass this value to subsequent session-aware calls.
+</ParamField>
+
+<ParamField path="heartbeat_period" type="uint8_t *">
+  (SPDM 1.2+) Receives the Responder's heartbeat period in seconds. The effective session timeout is `2 × heartbeat_period`.
+</ParamField>
+
+<ParamField path="measurement_hash" type="void *">
+  If non-NULL, receives the measurement summary hash. Buffer must be at least the negotiated hash size.
+</ParamField>
+
+```c
+uint32_t session_id;
+uint8_t heartbeat;
+libspdm_start_session(spdm_context,
+    false, NULL, 0,
+    SPDM_CHALLENGE_REQUEST_TCB_COMPONENT_MEASUREMENT_HASH,
+    0, 0,
+    &session_id, &heartbeat, NULL);
+```
+
+</Accordion>
+
+<Accordion title="libspdm_stop_session">
+
+Sends `END_SESSION` to terminate a secure session.
+
+**Signature**
+```c
+libspdm_return_t libspdm_stop_session(
+    void *spdm_context,
+    uint32_t session_id,
+    uint8_t end_session_attributes);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="uint32_t" required>
+  The session to terminate. Returned by `libspdm_start_session`.
+</ParamField>
+
+<ParamField path="end_session_attributes" type="uint8_t" required>
+  Actions for the Responder at session end. Bitmask:
+  - `SPDM_END_SESSION_REQUEST_ATTRIBUTES_PRESERVE_NEGOTIATED_STATE_CLEAR` — If set, the Responder clears its cached negotiated state. Only valid if the Responder supports `CACHE_CAP`.
+</ParamField>
+
+```c
+libspdm_stop_session(spdm_context, session_id, 0);
+```
+
+</Accordion>
+
+<Accordion title="libspdm_heartbeat">
+
+Sends `HEARTBEAT` within a session to keep it alive.
+
+**Signature**
+```c
+libspdm_return_t libspdm_heartbeat(
+    void *spdm_context,
+    uint32_t session_id);
+```
+
+**Description**
+
+Must be sent before `2 × heartbeat_period` seconds elapse without any other in-session message. Requires `HBEAT_CAP` on both endpoints.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="uint32_t" required>
+  The session to keep alive.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="libspdm_key_update">
+
+Sends `KEY_UPDATE` to rotate the session encryption keys.
+
+**Signature**
+```c
+libspdm_return_t libspdm_key_update(
+    void *spdm_context,
+    uint32_t session_id,
+    bool single_direction);
+```
+
+**Description**
+
+After the update, libspdm automatically issues `KEY_UPDATE` with `VerifyNewKey` to confirm the new keys are working. A secure session established via `libspdm_start_session` must exist before calling this function.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="uint32_t" required>
+  The session whose keys will be rotated.
+</ParamField>
+
+<ParamField path="single_direction" type="bool" required>
+  `true` — Rotate Responder-direction keys only (`UPDATE_KEY`). `false` — Rotate keys in both directions (`UPDATE_ALL_KEYS`).
+</ParamField>
+
+</Accordion>
+
+---
+
+## Certificate Provisioning
+
+<Accordion title="libspdm_get_csr">
+
+Sends `GET_CSR` to retrieve a Certificate Signing Request from the Responder.
+
+**Signature**
+```c
+libspdm_return_t libspdm_get_csr(
+    void *spdm_context,
+    const uint32_t *session_id,
+    const void *requester_info,
+    uint16_t requester_info_length,
+    const void *opaque_data,
+    uint16_t opaque_data_length,
+    void *csr,
+    size_t *csr_len);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="const uint32_t *">
+  Session context. NULL for an unsecured request.
+</ParamField>
+
+<ParamField path="requester_info" type="const void *">
+  Data conforming to the `CertificationRequestInfo` format (RFC 2986). May be NULL.
+</ParamField>
+
+<ParamField path="requester_info_length" type="uint16_t">
+  Size of `requester_info` in bytes.
+</ParamField>
+
+<ParamField path="opaque_data" type="const void *">
+  Opaque data to send to the Responder. May be NULL.
+</ParamField>
+
+<ParamField path="opaque_data_length" type="uint16_t">
+  Size of `opaque_data` in bytes.
+</ParamField>
+
+<ParamField path="csr" type="void *" required>
+  Buffer to receive the CSR.
+</ParamField>
+
+<ParamField path="csr_len" type="size_t *" required>
+  On input: buffer capacity. On output: actual CSR size.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="libspdm_set_certificate">
+
+Sends `SET_CERTIFICATE` to provision a certificate chain into a Responder slot.
+
+**Signature**
+```c
+libspdm_return_t libspdm_set_certificate(
+    void *spdm_context,
+    const uint32_t *session_id,
+    uint8_t slot_id,
+    const void *cert_chain,
+    size_t cert_chain_size);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="const uint32_t *">
+  Session context. NULL for an unsecured request.
+</ParamField>
+
+<ParamField path="slot_id" type="uint8_t" required>
+  Destination slot number (0–7) on the Responder.
+</ParamField>
+
+<ParamField path="cert_chain" type="const void *" required>
+  The certificate chain to provision.
+</ParamField>
+
+<ParamField path="cert_chain_size" type="size_t" required>
+  Size of the certificate chain in bytes.
+</ParamField>
+
+</Accordion>
+
+---
+
+## Events & Extension Logs
+
+<Accordion title="libspdm_get_event_types">
+
+Sends `GET_SUPPORTED_EVENT_TYPES` to query which event types the Responder supports. Requires an established session.
+
+**Signature**
+```c
+libspdm_return_t libspdm_get_event_types(
+    void *spdm_context,
+    uint32_t session_id,
+    uint32_t *event_group_count,
+    uint32_t *supported_event_groups_list_len,
+    void *supported_event_groups_list);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="uint32_t" required>
+  The established session through which the request is sent.
+</ParamField>
+
+<ParamField path="event_group_count" type="uint32_t *" required>
+  Receives the number of event groups in the response list.
+</ParamField>
+
+<ParamField path="supported_event_groups_list_len" type="uint32_t *" required>
+  On input: buffer capacity. On output: actual list size in bytes.
+</ParamField>
+
+<ParamField path="supported_event_groups_list" type="void *" required>
+  Buffer to receive the supported event groups list.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="libspdm_get_measurement_extension_log">
+
+Sends `GET_MEASUREMENT_EXTENSION_LOG` to retrieve the Measurement Extension Log (MEL) from the Responder.
+
+**Signature**
+```c
+libspdm_return_t libspdm_get_measurement_extension_log(
+    void *spdm_context,
+    const uint32_t *session_id,
+    size_t *mel_size,
+    void *measure_exten_log);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="const uint32_t *">
+  Session context. NULL for an unsecured request.
+</ParamField>
+
+<ParamField path="mel_size" type="size_t *" required>
+  On input: buffer capacity. On output: actual MEL size in bytes.
+</ParamField>
+
+<ParamField path="measure_exten_log" type="void *" required>
+  Buffer to receive the measurement extension log.
+</ParamField>
+
+</Accordion>
+
+---
+
+## SPDM 1.3+ Functions
+
+<Accordion title="libspdm_get_endpoint_info">
+
+Sends `GET_ENDPOINT_INFO` (SPDM 1.3) to retrieve endpoint information from the Responder.
+
+**Signature**
+```c
+libspdm_return_t libspdm_get_endpoint_info(
+    void *spdm_context,
+    const uint32_t *session_id,
+    uint8_t request_attributes,
+    uint8_t sub_code,
+    uint8_t slot_id,
+    uint32_t *ep_info_len,
+    void *ep_info,
+    const void *requester_nonce_in,
+    void *requester_nonce,
+    void *responder_nonce);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+<ParamField path="session_id" type="const uint32_t *">
+  If non-NULL, sends inside the identified session.
+</ParamField>
+<ParamField path="request_attributes" type="uint8_t" required>
+  Request attributes bitmask.
+</ParamField>
+<ParamField path="sub_code" type="uint8_t" required>
+  Sub-code identifying which endpoint information to retrieve.
+</ParamField>
+<ParamField path="slot_id" type="uint8_t" required>
+  Certificate slot ID to sign with.
+</ParamField>
+<ParamField path="ep_info_len" type="uint32_t *" required>
+  On input: buffer capacity. On output: actual endpoint info size in bytes.
+</ParamField>
+<ParamField path="ep_info" type="void *" required>
+  Buffer to receive endpoint information.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="libspdm_get_key_pair_info">
+
+Sends `GET_KEY_PAIR_INFO` (SPDM 1.3) to retrieve key pair capabilities and usage from the Responder.
+
+**Signature**
+```c
+libspdm_return_t libspdm_get_key_pair_info(
+    void *spdm_context,
+    const uint32_t *session_id,
+    uint8_t key_pair_id,
+    uint8_t *total_key_pairs,
+    uint16_t *capabilities,
+    uint16_t *key_usage_capabilities,
+    uint16_t *current_key_usage,
+    uint32_t *asym_algo_capabilities,
+    uint32_t *current_asym_algo,
+    uint32_t *pqc_asym_algo_capabilities,
+    uint32_t *current_pqc_asym_algo,
+    uint8_t *assoc_cert_slot_mask,
+    uint16_t *public_key_info_len,
+    void *public_key_info);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+<ParamField path="session_id" type="const uint32_t *">
+  If non-NULL, sends inside the identified session.
+</ParamField>
+<ParamField path="key_pair_id" type="uint8_t" required>
+  Identifier of the key pair to query.
+</ParamField>
+<ParamField path="total_key_pairs" type="uint8_t *">
+  Receives the total number of key pairs available on the Responder.
+</ParamField>
+<ParamField path="capabilities" type="uint16_t *">
+  Receives key pair capability flags.
+</ParamField>
+<ParamField path="current_asym_algo" type="uint32_t *">
+  Receives the current asymmetric algorithm in use by this key pair.
+</ParamField>
+<ParamField path="public_key_info_len" type="uint16_t *">
+  On input: buffer capacity. On output: size of public key info.
+</ParamField>
+<ParamField path="public_key_info" type="void *">
+  Buffer to receive the public key information structure.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="libspdm_subscribe_event_types">
+
+Sends `SUBSCRIBE_EVENT_TYPE` (SPDM 1.3) to subscribe to events from the Responder. Must be called inside an established secure session.
+
+**Signature**
+```c
+libspdm_return_t libspdm_subscribe_event_types(
+    void *spdm_context,
+    uint32_t session_id,
+    uint8_t subscribe_event_group_count,
+    uint32_t subscribe_list_len,
+    void *subscribe_list);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+<ParamField path="session_id" type="uint32_t" required>
+  The session through which the subscription is sent.
+</ParamField>
+<ParamField path="subscribe_event_group_count" type="uint8_t" required>
+  Number of event groups in `subscribe_list`.
+</ParamField>
+<ParamField path="subscribe_list_len" type="uint32_t" required>
+  Size in bytes of `subscribe_list`.
+</ParamField>
+<ParamField path="subscribe_list" type="void *" required>
+  Buffer containing the list of event groups to subscribe to.
+</ParamField>
+
+</Accordion>
+
+---
+
+## Vendor-Defined Messages
+
+<Accordion title="libspdm_vendor_send_request_receive_response">
+
+Sends a `VENDOR_DEFINED_REQUEST` and receives the corresponding `VENDOR_DEFINED_RESPONSE`. Requires calling `libspdm_init_connection` first so that algorithm negotiation is complete.
+
+**Signature**
+```c
+libspdm_return_t libspdm_vendor_send_request_receive_response(
+    void *spdm_context,
+    const uint32_t *session_id,
+    uint16_t req_standard_id,
+    uint8_t req_vendor_id_len,
+    const void *req_vendor_id,
+    uint32_t req_size,
+    const void *req_data,
+    uint16_t *resp_standard_id,
+    uint8_t *resp_vendor_id_len,
+    void *resp_vendor_id,
+    uint32_t *resp_size,
+    void *resp_data);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+<ParamField path="session_id" type="const uint32_t *">
+  If non-NULL, sends inside the identified session. If NULL, sends outside a session.
+</ParamField>
+<ParamField path="req_standard_id" type="uint16_t" required>
+  Registry or Standards Body identifier for the request.
+</ParamField>
+<ParamField path="req_vendor_id_len" type="uint8_t" required>
+  Length in bytes of `req_vendor_id`. May be 0.
+</ParamField>
+<ParamField path="req_vendor_id" type="const void *">
+  Vendor ID bytes. Little-endian format.
+</ParamField>
+<ParamField path="req_size" type="uint32_t" required>
+  Size in bytes of `req_data`.
+</ParamField>
+<ParamField path="req_data" type="const void *" required>
+  The vendor-defined request payload.
+</ParamField>
+<ParamField path="resp_standard_id" type="uint16_t *" required>
+  Receives the Standards Body identifier from the response.
+</ParamField>
+<ParamField path="resp_size" type="uint32_t *" required>
+  On input: capacity of `resp_data`. On output: actual response size.
+</ParamField>
+<ParamField path="resp_data" type="void *" required>
+  Buffer to receive the vendor-defined response payload.
+</ParamField>
+
+<Note>
+A `VENDOR_DEFINED_RESPONSE` is always expected even if the response has a zero-length payload.
+</Note>
+
+</Accordion>
+
+---
+
+## Algorithm Discovery
+
+<Accordion title="libspdm_get_supported_algorithms">
+
+Sends `GET_VERSION` and `GET_CAPABILITIES` with `Param1[0]` set to request the Supported Algorithms Block from the Responder (SPDM 1.3+).
+
+**Signature**
+```c
+libspdm_return_t libspdm_get_supported_algorithms(
+    void *spdm_context,
+    size_t *responder_supported_algorithms_length,
+    void *responder_supported_algorithms_buffer,
+    uint8_t *spdm_version);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+<ParamField path="responder_supported_algorithms_length" type="size_t *" required>
+  On input: buffer capacity. On output: size of the supported algorithms block in bytes.
+</ParamField>
+<ParamField path="responder_supported_algorithms_buffer" type="void *" required>
+  Buffer to receive the supported algorithms block. Must not be NULL.
+</ParamField>
+<ParamField path="spdm_version" type="uint8_t *">
+  Receives the SPDM version used for the exchange.
+</ParamField>
+
+Returns `LIBSPDM_STATUS_UNSUPPORTED_CAP` if the Requester does not support SPDM 1.3+ or CHUNK_CAP is not enabled.
+
+</Accordion>

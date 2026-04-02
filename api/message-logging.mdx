@@ -1,0 +1,171 @@
+---
+title: "Message Logging"
+description: "Functions for logging SPDM request and response messages to an integrator-provided buffer."
+---
+
+libspdm provides a message logging facility that captures raw SPDM request and response bytes into an integrator-supplied buffer. This is useful for:
+
+- **Transcript verification**: Preserve the exact bytes exchanged during connection establishment to verify signatures or audit the handshake independently.
+- **Debugging**: Capture the full message sequence for offline inspection.
+
+## Current Limitations
+
+- Message logging is currently only supported for the **Requester** role. Responder support may be added in a future release, at which point these functions may move to the common library.
+- Only the following message exchanges are logged: `GET_VERSION / VERSION`, `GET_CAPABILITIES / CAPABILITIES`, `NEGOTIATE_ALGORITHMS / ALGORITHMS`, and `GET_MEASUREMENTS / MEASUREMENTS`.
+
+---
+
+## Functions
+
+<Accordion title="libspdm_init_msg_log">
+
+Initializes the message logger with an integrator-provided buffer.
+
+**Signature**
+```c
+void libspdm_init_msg_log(
+    void *spdm_context,
+    void *msg_buffer,
+    size_t msg_buffer_size);
+```
+
+**Description**
+
+Call this function before enabling logging. The buffer must remain valid for as long as logging is active. The message logger is disabled by default after initialization; call `libspdm_set_msg_log_mode` to enable it.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="msg_buffer" type="void *" required>
+  Pointer to the buffer where messages will be stored.
+</ParamField>
+
+<ParamField path="msg_buffer_size" type="size_t" required>
+  Size of the buffer in bytes. If the buffer fills up, `libspdm_get_msg_log_status` will return `LIBSPDM_MSG_LOG_STATUS_BUFFER_FULL`.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="libspdm_set_msg_log_mode">
+
+Enables or disables the message logger.
+
+**Signature**
+```c
+void libspdm_set_msg_log_mode(
+    void *spdm_context,
+    uint32_t mode);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="mode" type="uint32_t" required>
+  Bitmask controlling logger operation.
+
+  | Bit | Constant | Effect |
+  |---|---|---|
+  | 0 | `LIBSPDM_MSG_LOG_MODE_ENABLE` | Set to enable logging; clear to disable logging. |
+</ParamField>
+
+</Accordion>
+
+<Accordion title="libspdm_get_msg_log_status">
+
+Returns the current status of the message logger.
+
+**Signature**
+```c
+uint32_t libspdm_get_msg_log_status(void *spdm_context);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+**Return value**
+
+A bitmask. `LIBSPDM_MSG_LOG_STATUS_BUFFER_FULL` (bit 0) is set when the log buffer has been exhausted and subsequent messages were not recorded.
+
+</Accordion>
+
+<Accordion title="libspdm_get_msg_log_size">
+
+Returns the number of bytes currently written to the log buffer.
+
+**Signature**
+```c
+size_t libspdm_get_msg_log_size(void *spdm_context);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+**Return value**
+
+Bytes written to the message log buffer since the last `libspdm_init_msg_log` or `libspdm_reset_msg_log` call.
+
+</Accordion>
+
+<Accordion title="libspdm_reset_msg_log">
+
+Resets the message log state, clearing the byte count and status flags without reallocating the buffer.
+
+**Signature**
+```c
+void libspdm_reset_msg_log(void *spdm_context);
+```
+
+**Description**
+
+Call this function to start a fresh log capture while reusing the same buffer. Note that `libspdm_reset_context` does **not** reset the message logger; `libspdm_reset_msg_log` must be called explicitly.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+</Accordion>
+
+---
+
+## Usage Example
+
+The following example captures the connection handshake messages and verifies the buffer did not overflow.
+
+```c
+/* 1. Allocate a log buffer large enough for the VCA transcript */
+#define LOG_BUFFER_SIZE LIBSPDM_MAX_MESSAGE_VCA_BUFFER_SIZE
+uint8_t log_buffer[LOG_BUFFER_SIZE];
+
+/* 2. Initialize logging before any SPDM communication */
+libspdm_init_msg_log(spdm_context, log_buffer, LOG_BUFFER_SIZE);
+
+/* 3. Enable the logger */
+libspdm_set_msg_log_mode(spdm_context, LIBSPDM_MSG_LOG_MODE_ENABLE);
+
+/* 4. Perform connection initialization (GET_VERSION, GET_CAPABILITIES,
+ *    NEGOTIATE_ALGORITHMS messages will be captured) */
+libspdm_return_t status = libspdm_init_connection(spdm_context, false);
+if (status != LIBSPDM_STATUS_SUCCESS) {
+    /* handle error */
+}
+
+/* 5. Check that the log did not overflow */
+uint32_t log_status = libspdm_get_msg_log_status(spdm_context);
+if (log_status & LIBSPDM_MSG_LOG_STATUS_BUFFER_FULL) {
+    /* buffer was too small; increase LOG_BUFFER_SIZE */
+}
+
+/* 6. Read the captured transcript */
+size_t log_size = libspdm_get_msg_log_size(spdm_context);
+/* log_buffer[0..log_size-1] contains the raw VCA transcript */
+
+/* 7. Disable and reset when done */
+libspdm_set_msg_log_mode(spdm_context, 0);
+libspdm_reset_msg_log(spdm_context);
+```
+
+The captured bytes in `log_buffer` are the raw concatenated request and response messages in the order they were exchanged. This transcript can be used, for example, to independently verify the `CHALLENGE_AUTH` signature by recomputing the hash over these bytes.

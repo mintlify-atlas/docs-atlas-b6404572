@@ -1,0 +1,336 @@
+---
+title: "Building a Requester"
+description: "Step-by-step guide to implementing an SPDM Requester using libspdm."
+keywords: ["spdm", "requester", "libspdm", "authentication", "measurements", "sessions"]
+---
+
+<Steps>
+
+<Step title="Choose libraries">
+
+Select the appropriate library configuration before writing any code.
+
+**Config macros** — Edit `include/library/spdm_lib_config.h` to enable the algorithms
+and capabilities your device needs:
+
+```c
+/* Cryptography */
+#define LIBSPDM_RSA_SSA_2048_SUPPORT  1
+#define LIBSPDM_ECDHE_P256_SUPPORT    1
+
+/* Capabilities */
+#define LIBSPDM_ENABLE_CAPABILITY_PSK_CAP      1
+#define LIBSPDM_ENABLE_CAPABILITY_MUT_AUTH_CAP 1
+#define LIBSPDM_ENABLE_CAPABILITY_CHUNK_CAP    1
+
+/* Data sizes */
+#define LIBSPDM_MAX_CERT_CHAIN_SIZE         65536
+#define LIBSPDM_MAX_MEASUREMENT_RECORD_SIZE 65536
+```
+
+**Requester HAL libraries** — Implement the following in your platform layer:
+
+| Library | When required |
+|---------|---------------|
+| `timelib` | Always — handles `RTT`, `T1`, `T2` timeout values |
+| `reqasymsignlib` | Mutual authentication is enabled |
+| `psklib` | PSK exchange is enabled |
+
+Implement `reqasymsignlib` and `psklib` in a secure environment. If SPDM session key
+confidentiality is required, also implement `spdm_secured_message_lib` in a secure
+environment.
+
+**Crypto backend** — Choose either the OpenSSL wrapper (`cryptlib_openssl`) or the Mbed TLS
+wrapper (`cryptlib_mbedtls`). See [Cryptography](/guides/cryptography) for per-backend
+algorithm limitations.
+
+**Transport** — Choose at least one transport library: `spdm_transport_mctp_lib` for MCTP
+or `spdm_transport_pcidoe_lib` for PCI DOE. See [Transport Layers](/guides/transport-layers).
+
+Implement `libspdm_device_send_message_func` and `libspdm_device_receive_message_func` per
+`spdm_common_lib.h`. The `timeout` parameter is in microseconds. For a Requester, the send
+timeout is `RTT` and the receive timeout is `T1 = RTT + ST1` or `T2 = RTT + CT = RTT + 2^ct_exponent`.
+
+</Step>
+
+<Step title="Initialize context">
+
+Allocate and initialize the SPDM context, then set up the scratch buffer.
+
+```c
+spdm_context = (void *)malloc(libspdm_get_context_size());
+libspdm_init_context(spdm_context);
+
+scratch_buffer_size = libspdm_get_sizeof_required_scratch_buffer(m_spdm_context);
+scratch_buffer = (void *)malloc(scratch_buffer_size);
+libspdm_set_scratch_buffer(spdm_context, m_scratch_buffer, scratch_buffer_size);
+```
+
+The scratch buffer size depends on `LIBSPDM_ENABLE_CAPABILITY_CHUNK_CAP` and
+`LIBSPDM_RESPOND_IF_READY_SUPPORT`. You can also calculate it from the `max_spdm_msg_size`
+passed to `libspdm_register_transport_layer_func()` using `libspdm_get_scratch_buffer_capacity()`.
+
+To isolate session keys in a separate secure memory region, use the variant initialization:
+
+```c
+spdm_secured_context_size = libspdm_secured_message_get_context_size();
+spdm_secured_contexts[0] = (void *)pointer_to_secured_memory_0;
+spdm_secured_contexts[1] = (void *)pointer_to_secured_memory_1;
+/* ... one entry per session ... */
+spdm_secured_contexts[num_sessions] = (void *)pointer_to_secured_memory_num_sessions;
+
+spdm_context = (void *)malloc(libspdm_get_context_size_without_secured_context());
+libspdm_init_context_with_secured_context(spdm_context, spdm_secured_contexts, num_sessions);
+```
+
+<Note>
+Both `spdm_context` and `scratch_buffer` may contain session keys or decrypted secured
+message content. Zero both buffers before freeing or reusing them.
+</Note>
+
+</Step>
+
+<Step title="Register callbacks">
+
+Register the device I/O functions, transport layer, and device buffer functions. The final
+sent and received messages are placed in the sender and receiver buffers respectively.
+
+```c
+libspdm_register_device_io_func(
+    spdm_context,
+    spdm_device_send_message,
+    spdm_device_receive_message);
+
+libspdm_register_transport_layer_func(
+    spdm_context,
+    LIBSPDM_MAX_SPDM_MSG_SIZE,          /* defined by the Integrator */
+    LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE,
+    LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE,
+    libspdm_transport_mctp_encode_message,
+    libspdm_transport_mctp_decode_message);
+
+libspdm_register_device_buffer_func(
+    spdm_context,
+    LIBSPDM_SENDER_BUFFER_SIZE,         /* defined by the Integrator */
+    LIBSPDM_RECEIVER_BUFFER_SIZE,       /* defined by the Integrator */
+    spdm_device_acquire_sender_buffer,
+    spdm_device_release_sender_buffer,
+    spdm_device_acquire_receiver_buffer,
+    spdm_device_release_receiver_buffer);
+```
+
+Replace the MCTP constants and encode/decode functions with their PCI DOE equivalents when
+using that transport. See [Transport Layers](/guides/transport-layers).
+
+</Step>
+
+<Step title="Set capabilities and algorithms">
+
+Advertise the Requester's capabilities and preferred algorithms via `libspdm_set_data`. These
+values are negotiated with the Responder during `NEGOTIATE_ALGORITHMS`.
+
+```c
+parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+
+libspdm_set_data(spdm_context, LIBSPDM_DATA_CAPABILITY_CT_EXPONENT,
+                 &parameter, &ct_exponent, sizeof(ct_exponent));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_CAPABILITY_FLAGS,
+                 &parameter, &cap_flags, sizeof(cap_flags));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_CAPABILITY_RTT_US,
+                 &parameter, &rtt, sizeof(rtt));
+
+libspdm_set_data(spdm_context, LIBSPDM_DATA_MEASUREMENT_SPEC,
+                 &parameter, &measurement_spec, sizeof(measurement_spec));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_BASE_ASYM_ALGO,
+                 &parameter, &base_asym_algo, sizeof(base_asym_algo));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_BASE_HASH_ALGO,
+                 &parameter, &base_hash_algo, sizeof(base_hash_algo));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_DHE_NAME_GROUP,
+                 &parameter, &dhe_named_group, sizeof(dhe_named_group));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_AEAD_CIPHER_SUITE,
+                 &parameter, &aead_cipher_suite, sizeof(aead_cipher_suite));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_REQ_BASE_ASYM_ALG,
+                 &parameter, &req_base_asym_alg, sizeof(req_base_asym_alg));
+libspdm_set_data(spdm_context, LIBSPDM_DATA_KEY_SCHEDULE,
+                 &parameter, &key_schedule, sizeof(key_schedule));
+```
+
+</Step>
+
+<Step title="Deploy certificates">
+
+Provide the trust anchors used to verify the Responder, and optionally the Requester's own
+certificate chain for mutual authentication.
+
+**Peer root certificate** (Responder verification):
+
+```c
+parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+libspdm_set_data(spdm_context, LIBSPDM_DATA_PEER_PUBLIC_ROOT_CERT,
+                 &parameter, peer_root_cert, peer_root_cert_size);
+```
+
+Multiple root certificates can be set in sequence up to `LIBSPDM_MAX_ROOT_CERT_SUPPORT`.
+
+**Local certificate chain** (mutual authentication):
+
+```c
+parameter.additional_data[0] = slot_id;
+libspdm_set_data(spdm_context, LIBSPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN,
+                 &parameter, my_public_cert_chains, my_public_cert_chains_size);
+```
+
+**Raw public key** (optional alternative per RFC 7250, ASN.1 DER-encoded `SubjectPublicKeyInfo`):
+
+```c
+parameter.location = LIBSPDM_DATA_LOCATION_LOCAL;
+libspdm_set_data(spdm_context, LIBSPDM_DATA_PEER_PUBLIC_KEY,
+                 &parameter, peer_public_key, peer_public_key_size);
+libspdm_set_data(spdm_context, LIBSPDM_DATA_LOCAL_PUBLIC_KEY,
+                 &parameter, local_public_key, local_public_key_size);
+```
+
+</Step>
+
+<Step title="Create connection">
+
+Send `GET_VERSION`, `GET_CAPABILITIES`, and `NEGOTIATE_ALGORITHMS` to establish the
+connection with the Responder.
+
+```c
+libspdm_init_connection(spdm_context, FALSE);
+```
+
+Pass `TRUE` as the second argument to only perform `GET_VERSION`, skipping capability and
+algorithm negotiation.
+
+</Step>
+
+<Step title="Authenticate">
+
+Retrieve the Responder's certificate digests, fetch the certificate chain, then challenge
+the Responder to prove it holds the private key.
+
+```c
+libspdm_get_digest(spdm_context, session_id, slot_mask, total_digest_buffer);
+
+libspdm_get_certificate(spdm_context, session_id, slot_id,
+                        cert_chain_size, cert_chain);
+
+libspdm_challenge(spdm_context, NULL, slot_id,
+                  measurement_hash_type, measurement_hash, &slot_mask);
+```
+
+`libspdm_get_digest` returns a bitmask in `slot_mask` indicating which slots are populated.
+Call `libspdm_get_certificate` for each slot of interest.
+
+</Step>
+
+<Step title="Get measurements">
+
+Query the total number of measurement blocks, then retrieve each block individually.
+
+**Query block count:**
+
+```c
+libspdm_get_measurement(
+    spdm_context,
+    session_id,
+    request_attribute,
+    SPDM_GET_MEASUREMENTS_REQUEST_MEASUREMENT_OPERATION_TOTAL_NUMBER_OF_MEASUREMENTS,
+    slot_id,
+    &content_changed,
+    &number_of_blocks,
+    NULL,
+    NULL);
+```
+
+**Retrieve each block (request a signature on the final one):**
+
+```c
+for (index = 1; index <= number_of_blocks; index++) {
+    if (index == number_of_blocks) {
+        request_attribute = SPDM_GET_MEASUREMENTS_REQUEST_ATTRIBUTES_GENERATE_SIGNATURE;
+    }
+    libspdm_get_measurement(
+        spdm_context,
+        session_id,
+        request_attribute,
+        index,
+        slot_id,
+        &content_changed,
+        &number_of_block,
+        &measurement_record_length,
+        &measurement_record);
+}
+```
+
+Setting `GENERATE_SIGNATURE` on the final request causes the Responder to sign the full
+measurement transcript, binding it to its identity key.
+
+</Step>
+
+<Step title="Manage sessions">
+
+**KEY_EXCHANGE session** (asymmetric, certificate-based):
+
+```c
+libspdm_start_session(
+    spdm_context,
+    FALSE,   /* use KEY_EXCHANGE/FINISH, not PSK */
+    NULL, 0,
+    SPDM_CHALLENGE_REQUEST_TCB_COMPONENT_MEASUREMENT_HASH,
+    slot_id,
+    session_policy,
+    &session_id,
+    &heartbeat_period,
+    &measurement_hash);
+```
+
+**PSK session** (pre-shared key):
+
+```c
+libspdm_start_session(
+    spdm_context,
+    TRUE,    /* use PSK_EXCHANGE/PSK_FINISH */
+    psk_hint, psk_hint_size,
+    SPDM_CHALLENGE_REQUEST_TCB_COMPONENT_MEASUREMENT_HASH,
+    slot_id,
+    session_policy,
+    &session_id,
+    &heartbeat_period,
+    &measurement_hash);
+```
+
+**Close a session:**
+
+```c
+libspdm_stop_session(spdm_context, session_id, end_session_attributes);
+```
+
+Within an active session you can also send heartbeats and rotate keys:
+
+```c
+libspdm_heartbeat(spdm_context, session_id);
+libspdm_key_update(spdm_context, session_id, single_direction);
+```
+
+</Step>
+
+<Step title="Cleanup">
+
+Release internal resources allocated by libspdm. This function does not free the
+`spdm_context` buffer itself.
+
+```c
+libspdm_deinit_context(spdm_context);
+```
+
+<Note>
+Zero both `spdm_context` and `scratch_buffer` before calling `free()`. These buffers may
+contain residual session key material or decrypted secured message content.
+</Note>
+
+</Step>
+
+</Steps>

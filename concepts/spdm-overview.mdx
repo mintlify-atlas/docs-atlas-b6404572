@@ -1,0 +1,145 @@
+---
+title: "SPDM Overview"
+description: "An introduction to the Security Protocol and Data Model (SPDM, DSP0274) — a request/response protocol for hardware component identity, attestation, and secure key exchange."
+---
+
+## What is SPDM?
+
+SPDM (Security Protocol and Data Model, [DSP0274](https://www.dmtf.org/dsp/DSP0274)) is a DMTF standard that defines a request/response protocol for authenticating hardware components, attesting their firmware and configuration state, and establishing encrypted communication channels — all without requiring a host operating system.
+
+SPDM is designed for device-to-device security: a CPU authenticating a PCIe NIC, a BMC verifying a GPU, or a hypervisor confirming the integrity of a storage controller. It operates below the OS layer and is transport-agnostic, running over MCTP, PCI DOE, Storage, or TCP.
+
+<Note>
+  SPDM is not a transport protocol. It defines the messages and semantics; the transport binding (MCTP, PCI DOE, etc.) carries those messages across the physical medium.
+</Note>
+
+---
+
+## The Requester / Responder Model
+
+Every SPDM exchange involves exactly two roles:
+
+| Role | Responsibility |
+|------|----------------|
+| **Requester** | Initiates all SPDM messages. Typically the host, BMC, or root-of-trust. |
+| **Responder** | Receives requests and sends responses. Typically a device such as a NIC, GPU, or SSD. |
+
+The Requester always drives the conversation. The Responder never sends an unsolicited message during a connection (except in the context of event notifications introduced in SPDM 1.3).
+
+---
+
+## SPDM Connection Lifecycle
+
+An SPDM connection follows a defined sequence of phases. Steps 1–3 are always required. Steps 4–6 are performed based on the capabilities and use case.
+
+<Steps>
+  <Step title="Version Negotiation">
+    The Requester sends `GET_VERSION`. The Responder replies with `VERSION`, listing the SPDM versions it supports. Both sides agree on a common version for the rest of the connection.
+  </Step>
+  <Step title="Capability Negotiation">
+    The Requester sends `GET_CAPABILITIES` (including its own capability flags). The Responder replies with `CAPABILITIES`. Each side learns what the other can do — for example, whether mutual authentication, measurements, or sessions are supported.
+  </Step>
+  <Step title="Algorithm Negotiation">
+    The Requester sends `NEGOTIATE_ALGORITHMS`, proposing cryptographic algorithms. The Responder replies with `ALGORITHMS`, selecting a single algorithm from each category (hash, asymmetric signature, key exchange, AEAD). All subsequent cryptographic operations use these negotiated algorithms.
+  </Step>
+  <Step title="Authentication">
+    The Requester authenticates the Responder using certificate-based identity:
+
+    - `GET_DIGESTS` → `DIGESTS`: Requester learns which certificate slots are populated.
+    - `GET_CERTIFICATE` → `CERTIFICATE`: Requester retrieves the full certificate chain from a chosen slot.
+    - `CHALLENGE` → `CHALLENGE_AUTH`: Requester issues a cryptographic challenge; the Responder signs a transcript with its private key, proving possession.
+
+    Optionally, the Responder may also challenge the Requester (mutual authentication).
+  </Step>
+  <Step title="Measurements (Optional)">
+    The Requester sends `GET_MEASUREMENTS` to retrieve measurement blocks — firmware digests, configuration registers, or other attestation evidence. The Responder can return measurements signed by its attestation key, allowing the Requester to verify the device's runtime state.
+  </Step>
+  <Step title="Secure Session (Optional)">
+    An encrypted and authenticated session can be established after authentication:
+
+    - **Asymmetric key exchange**: `KEY_EXCHANGE` → `KEY_EXCHANGE_RSP` → `FINISH` → `FINISH_RSP`. Uses ECDHE or FFDHE to derive session keys.
+    - **Pre-shared key**: `PSK_EXCHANGE` → `PSK_EXCHANGE_RSP` → `PSK_FINISH` → `PSK_FINISH_RSP`. Uses a shared secret known to both sides.
+
+    Once a session is active, application messages are encrypted using the negotiated AEAD cipher. Sessions can be terminated with `END_SESSION`.
+  </Step>
+</Steps>
+
+---
+
+## Certificate Slot Model
+
+SPDM supports up to **8 certificate slots** per Responder, numbered **slot 0 through slot 7**.
+
+Each slot holds a complete X.509 certificate chain, from a leaf device certificate up to a root CA. The Requester uses `GET_DIGESTS` to discover which slots are populated, then fetches the chain from a specific slot with `GET_CERTIFICATE`.
+
+<Info>
+  Slot 0 is the default slot and is used when no explicit slot is specified. Devices may use additional slots for different key usages, key pairs, or CA hierarchies.
+</Info>
+
+Key concepts:
+
+- The **provisioned slot mask** indicates which slots contain certificate chains.
+- The **supported slot mask** indicates which slots the Responder is willing to use for authentication.
+- Each slot is associated with a **key pair** — the Responder holds the private key and uses it for challenge responses and session establishment.
+
+---
+
+## Measurement Model
+
+Measurements provide evidence of a device's firmware and configuration state at runtime. Each measurement is a **measurement block** identified by a numeric index.
+
+- Measurement blocks may contain raw digests (e.g., SHA-256 of a firmware image) or structured data.
+- The Requester requests specific blocks by index, or requests all blocks in a single message.
+- Measurements can be returned **unsigned** (informational) or **signed** by the Responder's asymmetric attestation key (verifiable).
+- Signed measurement responses include a nonce provided by the Requester, preventing replay attacks.
+
+The measurement format follows the DMTF measurement specification (DMTF DSP0274 and related specs such as TCG DICE).
+
+---
+
+## Secure Sessions
+
+SPDM sessions provide confidentiality and integrity for application-layer data exchanged over the SPDM channel.
+
+| Session Type | Key Establishment | Use Case |
+|---|---|---|
+| **KEY_EXCHANGE** | Ephemeral Diffie-Hellman (ECDHE or FFDHE) | Forward-secure sessions; requires asymmetric auth |
+| **PSK_EXCHANGE** | Pre-shared symmetric key | Constrained devices without PKI infrastructure |
+
+Once established, session messages are AEAD-encrypted (AES-GCM, ChaCha20-Poly1305, or SM4-GCM). Each session is identified by a **session ID** assigned by the Responder. A single SPDM connection can carry multiple concurrent sessions.
+
+Session maintenance messages include:
+- `HEARTBEAT` / `HEARTBEAT_ACK`: keepalive for idle sessions.
+- `KEY_UPDATE` / `KEY_UPDATE_ACK`: rekeying without re-running full key exchange.
+- `END_SESSION` / `END_SESSION_ACK`: graceful session termination.
+
+---
+
+## Transport Bindings
+
+SPDM messages are transport-agnostic. The SPDM layer produces and consumes message payloads; the transport binding wraps them for the physical medium.
+
+| Transport | Specification | Typical Usage |
+|---|---|---|
+| **MCTP** | DSP0275, DSP0276 | SMBus, PCIe VDM — platform management bus |
+| **PCI DOE** | PCI Express Base Spec | PCIe-attached devices (NVMe, CXL, GPU) |
+| **Storage** | DSP0286 | NVMe, SAS/SATA storage devices |
+| **TCP** | DSP0287 | Network-attached devices, out-of-band management |
+
+libspdm provides built-in transport libraries for MCTP (`spdm_transport_mctp_lib`) and PCI DOE (`spdm_transport_pcidoe_lib`). Integrators implementing other transports register their own encode/decode functions.
+
+---
+
+## SPDM Version History
+
+| Version | Key Additions |
+|---|---|
+| **1.0** | Core protocol: `GET_VERSION`, `GET_CAPABILITIES`, `NEGOTIATE_ALGORITHMS`, `GET_DIGESTS`, `GET_CERTIFICATE`, `CHALLENGE`, `GET_MEASUREMENTS`, `VENDOR_DEFINED_REQUEST` |
+| **1.1** | Secure sessions: `KEY_EXCHANGE`, `FINISH`, `PSK_EXCHANGE`, `PSK_FINISH`, `END_SESSION`, `HEARTBEAT`, `KEY_UPDATE`, and encapsulated (mutual auth) messages |
+| **1.2** | Certificate management: `GET_CSR`, `SET_CERTIFICATE`; large message chunking: `CHUNK_SEND`, `CHUNK_GET` |
+| **1.3** | Key pair management: `GET_KEY_PAIR_INFO`, `SET_KEY_PAIR_INFO`; event subscriptions: `SUBSCRIBE_EVENT_TYPE`, `GET_SUPPORTED_EVENT_TYPES`; endpoint info: `GET_ENDPOINT_INFO`; measurement extension log: `GET_MEASUREMENT_EXTENSION_LOG` |
+| **1.4** | Additional messages (in progress in libspdm) |
+
+<Note>
+  libspdm implements DSP0274 versions 1.0 through 1.3 fully, with 1.4 support in progress. Both sides negotiate a common version at the start of every connection.
+</Note>

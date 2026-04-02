@@ -1,0 +1,349 @@
+---
+title: "Fuzzing & Code Coverage"
+---
+
+libspdm supports code coverage collection, fuzz testing with multiple engines, symbolic execution, and static analysis.
+
+The weekly unit test code coverage report is published at [https://dmtf.github.io/libspdm/coverage_log/](https://dmtf.github.io/libspdm/coverage_log/).
+
+## Code Coverage
+
+### Windows with DynamoRIO
+
+Download and install [DynamoRIO 8.0.0](https://github.com/DynamoRIO/dynamorio/wiki/Downloads), then install [ActivePerl 5.26](https://www.activestate.com/products/perl/downloads/).
+
+```bash
+set DRIO_PATH=<DynamoRIO_PATH>
+```
+
+Build your test cases, then navigate to the log directory:
+
+```bash
+cd libspdm\build
+mkdir log
+cd log
+```
+
+Run each test app and generate a `.drcov` log file:
+
+```bash
+%DRIO_PATH%\<bin64|bin32>\drrun.exe -c %DRIO_PATH%\tools\<lib64|lib32>\release\drcov.dll -- <test_app>
+```
+
+Convert the coverage data to lcov format, filtering to libspdm sources:
+
+```bash
+%DRIO_PATH%\tools\<bin64|bin32>\drcov2lcov.exe -dir . -src_filter libspdm
+```
+
+Generate the HTML report:
+
+```bash
+perl %DRIO_PATH%\tools\<bin64|bin32>\genhtml coverage.info
+```
+
+The final report is `index.html` in the log directory.
+
+### Linux with lcov/gcov
+
+Install lcov:
+
+```bash
+sudo apt-get install lcov
+```
+
+Build with coverage instrumentation enabled via `-DGCOV=ON`:
+
+```bash
+cd libspdm
+mkdir build
+cd build
+cmake -DARCH=<x64|ia32|arm|aarch64|riscv32|riscv64|arc> -DTOOLCHAIN=GCC -DTARGET=<Debug|Release> -DCRYPTO=<mbedtls|openssl> -DGCOV=ON ..
+make copy_sample_key
+make
+```
+
+Create a log directory and run all tests:
+
+```bash
+cd libspdm/build
+mkdir log
+cd log
+# run test binaries here
+```
+
+Collect and generate the coverage report:
+
+```bash
+lcov --capture --directory <libspdm_root_dir> --output-file coverage.info
+genhtml coverage.info --output-directory .
+```
+
+The final report is `index.html` in the log directory.
+
+## Fuzzing
+
+### libFuzzer (Linux)
+
+libFuzzer is part of LLVM and enables coverage-guided fuzzing with AddressSanitizer. When building with the `LIBFUZZER` toolchain, `-fsanitize=fuzzer,address` is applied automatically.
+
+Install LLVM and Clang:
+
+```bash
+sudo apt install llvm clang
+```
+
+Verify the installed versions:
+
+```bash
+llvm-ar --version
+clang --version
+```
+
+Build with the `LIBFUZZER` toolchain:
+
+```bash
+cd libspdm
+mkdir build_libfuzz
+cd build_libfuzz
+cmake -DARCH=x64 -DTOOLCHAIN=LIBFUZZER -DTARGET=Release -DCRYPTO=mbedtls ..
+make copy_sample_key
+make
+```
+
+To collect code coverage during fuzzing, add `-DGCOV=ON`:
+
+```bash
+cmake -DARCH=x64 -DTOOLCHAIN=LIBFUZZER -DTARGET=Release -DCRYPTO=mbedtls -DGCOV=ON ..
+```
+
+Run a fuzz target:
+
+```bash
+mkdir NEW_CORPUS_DIR  # copy test seeds into this folder before running
+<test_app> NEW_CORPUS_DIR -rss_limit_mb=0 -artifact_prefix=<OUTPUT_PATH>
+```
+
+To run all fuzz targets for a set duration using the provided script (requires [screen](https://www.gnu.org/software/screen/)):
+
+```bash
+sudo apt install screen
+libspdm/unit_test/fuzzing/fuzzing_LibFuzzer.sh <CRYPTO> <GCOV> <duration>
+# CRYPTO: mbedtls or openssl
+# GCOV:   ON or OFF
+# duration: seconds per test case
+```
+
+Example — mbedtls, coverage enabled, 30 seconds per case:
+
+```bash
+libspdm/unit_test/fuzzing/fuzzing_LibFuzzer.sh mbedtls ON 30
+```
+
+Output is written to:
+
+```bash
+libspdm/unit_test/fuzzing/out_libfuzz_<CRYPTO>_<GitLogHash>/
+# e.g. libspdm/unit_test/fuzzing/out_libfuzz_mbedtls_05e7bb4/
+```
+
+### libFuzzer (Windows)
+
+IA32 builds are not supported with LLVM on Windows. Ensure LLVM binaries are in `PATH`, then build:
+
+```bash
+cmake -DARCH=x64 -DTOOLCHAIN=LIBFUZZER -DTARGET=Release -DCRYPTO=mbedtls ..
+```
+
+Run a fuzz target:
+
+```bash
+mkdir NEW_CORPUS_DIR
+<test_app> NEW_CORPUS_DIR -rss_limit_mb=0 -artifact_prefix=<OUTPUT_PATH>
+```
+
+<Note>
+  LLVM13 is the validated version for libFuzzer builds. When installing on
+  Windows, set the install path to `C:\LLVM` and add `C:\LLVM\bin` to `PATH`.
+  The libfuzzer lib path is hard-coded in CMakeLists.txt, so other versions may
+  fail to build.
+</Note>
+
+### AFL (Linux)
+
+Download and install [AFL](https://lcamtuf.coredump.cx/afl/):
+
+```bash
+tar zxvf afl-latest.tgz
+cd afl-2.52b/
+make
+export AFL_PATH=<AFL_PATH>
+export PATH=$PATH:$AFL_PATH
+```
+
+Configure the OS (required after each reboot):
+
+```bash
+sudo bash -c 'echo core >/proc/sys/kernel/core_pattern'
+cd /sys/devices/system/cpu/
+sudo bash -c 'echo performance | tee cpu*/cpufreq/scaling_governor'
+```
+
+Build with the AFL toolchain:
+
+```bash
+cd libspdm
+mkdir build
+cd build
+cmake -DARCH=x64 -DTOOLCHAIN=AFL -DTARGET=Release -DCRYPTO=mbedtls ..
+make copy_sample_key
+make
+```
+
+Run a fuzz target:
+
+```bash
+mkdir testcase_dir
+mkdir /dev/shm/findings_dir
+cp <seed> testcase_dir
+afl-fuzz -i testcase_dir -o /dev/shm/findings_dir <test_app> @@
+```
+
+To run all cases with the automation script:
+
+```bash
+sudo apt install screen
+libspdm/unit_test/fuzzing/fuzzing_AFL.sh <CRYPTO> <GCOV> <duration>
+```
+
+Example — mbedtls, coverage enabled, 60 seconds per case:
+
+```bash
+libspdm/unit_test/fuzzing/fuzzing_AFL.sh mbedtls ON 60
+```
+
+Output paths:
+
+```bash
+libspdm/unit_test/fuzzing/out_<CRYPTO>_<GitLogHash>/SummaryList.csv
+libspdm/unit_test/fuzzing/out_<CRYPTO>_<GitLogHash>/coverage_log/index.html
+```
+
+### OSS-Fuzz (Linux, local)
+
+Install [Docker](https://docs.docker.com/engine/install/ubuntu/), then clone and configure OSS-Fuzz:
+
+```bash
+git clone https://github.com/google/oss-fuzz.git
+cd oss-fuzz
+export PROJECT_NAME=libspdm
+export LANGUAGE=c
+python3 infra/helper.py generate $PROJECT_NAME --language=$LANGUAGE
+```
+
+Copy the libspdm OSS-Fuzz configuration:
+
+```bash
+cp ~/libspdm/unit_test/fuzzing/oss-fuzz_conf/* ~/oss-fuzz/projects/libspdm/
+```
+
+Build the Docker image and fuzz targets:
+
+```bash
+sudo python3 infra/helper.py build_image $PROJECT_NAME
+sudo python3 infra/helper.py build_fuzzers --sanitizer coverage $PROJECT_NAME
+```
+
+Run a specific fuzz target:
+
+```bash
+cd oss-fuzz
+sudo mkdir -p ./build/corpus/$PROJECT_NAME/test_spdm_responder_version
+zip -j ./build/out/libspdm/test_spdm_responder_version_seed_corpus.zip \
+  ~/libspdm/unit_test/fuzzing/seeds/test_spdm_responder_version/*
+sudo python3 infra/helper.py run_fuzzer \
+  --corpus-dir=./build/corpus/libspdm/test_spdm_responder_version \
+  $PROJECT_NAME test_spdm_responder_version
+```
+
+Generate a coverage report from local corpus:
+
+```bash
+sudo python3 infra/helper.py coverage --no-corpus-download $PROJECT_NAME \
+  --fuzz-target=test_spdm_responder_version
+```
+
+Report is written to `~/oss-fuzz/build/out/$PROJECT_NAME/report/linux/index.html`.
+
+## Symbolic Execution
+
+### KLEE
+
+Download and install [KLEE with LLVM9](https://klee.github.io/build-llvm9/) following all 12 steps. The [STP constraint solver](https://klee.github.io/build-stp) is recommended.
+
+Set stack size and environment:
+
+```bash
+ulimit -s unlimited
+export KLEE_SRC_PATH=<KLEE_SOURCE_DIR>
+export KLEE_BIN_PATH=<KLEE_BUILD_DIR>
+export PATH=$KLEE_BIN_PATH:$PATH
+```
+
+Build libspdm with the KLEE toolchain (Linux only):
+
+```bash
+cmake -DARCH=x64 -DTOOLCHAIN=KLEE -DTARGET=Release -DCRYPTO=mbedtls ..
+```
+
+Generate test inputs covering new execution states:
+
+```bash
+klee --only-output-states-covering-new <test_app>
+```
+
+Convert `.ktest` files to seed files for use with AFL:
+
+```bash
+python unit_test/fuzzing/Tools/TransferKtestToSeed.py <KtestFile>
+# or with multiple files/folders:
+python unit_test/fuzzing/Tools/TransferKtestToSeed.py <KtestFolder1> <KtestFolder2>
+```
+
+## Static Analysis
+
+### Coverity
+
+libspdm supports [Coverity](https://scan.coverity.com/) static analysis. Example for a Windows x64 build using VS2019 (run from an x64 Native Tools Command Prompt):
+
+```bash
+set PATH=%PATH%;C:\Program Files\Coverity\Coverity Static Analysis\bin\
+cov-configure --msvc --config C:\libspdm\CoverityConfig\coverity-config.xml
+```
+
+Generate the makefile and build with Coverity instrumentation:
+
+```bash
+cd libspdm
+mkdir build
+cd build
+cmake -G"NMake Makefiles" -DARCH=x64 -DTOOLCHAIN=VS2019 -DTARGET=Release -DCRYPTO=mbedtls ..
+nmake copy_sample_key
+cov-build --config C:\libspdm\CoverityConfig\coverity-config.xml --dir C:\libspdm\coverity-output nmake
+```
+
+Analyze and generate the HTML report:
+
+```bash
+cov-analyze --dir C:\libspdm\coverity-output --all --rule --enable-constraint-fpp --enable-fnptr --enable-virtual --enable FORWARD_NULL
+cov-format-errors --dir C:\libspdm\coverity-output --html-output html-report
+```
+
+The report is in the `html-report` folder.
+
+### CodeQL
+
+libspdm supports [CodeQL](https://codeql.github.com/) via GitHub Actions CI.
+
+- [Setting up code scanning for a repository](https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/setting-up-code-scanning-for-a-repository#setting-up-code-scanning-using-actions)
+- [Managing code scanning alerts](https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/managing-code-scanning-alerts-for-your-repository#viewing-the-alerts-for-a-repository)

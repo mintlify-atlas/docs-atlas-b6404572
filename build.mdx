@@ -1,0 +1,316 @@
+---
+title: "Build Guide"
+description: "Build libspdm for all supported platforms including Windows, Linux, ARM, AArch64, and RISC-V."
+---
+
+## Prerequisites
+
+### Compilers
+
+<Tabs>
+  <Tab title="Windows">
+    **IA32 / X64:**
+
+    - [Visual Studio 2022](https://visualstudio.microsoft.com/vs/older-downloads/), [Visual Studio 2019](https://visualstudio.microsoft.com/vs/older-downloads/), or [Visual Studio 2015](https://visualstudio.microsoft.com/vs/older-downloads/)
+    - [LLVM 13](https://github.com/llvm/llvm-project/releases/tag/llvmorg-13.0.0) — install to `C:\LLVM` and add `C:\LLVM\bin` to `PATH`. Visual Studio is still required for `nmake`. Note that ia32 builds are not supported with CLANG on Windows.
+
+    **ARM / AArch64:**
+
+    - [ARM Development Studio 2022](https://developer.arm.com/downloads/-/arm-development-studio-downloads) — requires [MSYS2](https://www.msys2.org/) (`MSYS2 MINGW64` prompt). Install cmake and make with `pacman -S mingw-w64-x86_64-cmake` and `pacman -S make`.
+
+    For other architectures, refer to [doc/build.md](https://github.com/DMTF/libspdm/blob/main/doc/build.md).
+  </Tab>
+  <Tab title="Linux">
+    **IA32 / X64:**
+
+    - [GCC](https://gcc.gnu.org/) 5 or higher
+    - [LLVM / Clang](https://llvm.org/) 10 or higher: `sudo apt-get install llvm-10 clang-10`
+
+    For ia32 builds on a 64-bit Linux host, install multilib support:
+
+    ```bash
+    sudo apt-get install gcc-multilib
+    ```
+
+    **ARM / AArch64:**
+
+    - ARM Development Studio 2022, ARM GNU toolchain, ARM GNU bare-metal, ARM GCC (`gcc-arm-linux-gnueabi`), or AARCH64 GCC (`gcc-aarch64-linux-gnu`)
+
+    **RISC-V:**
+
+    - RISCV XPACK, RISCV GNU toolchain, RISCV64 GCC, or RISCV NONE (baremetal)
+
+    For other architectures, refer to [doc/build.md](https://github.com/DMTF/libspdm/blob/main/doc/build.md).
+  </Tab>
+</Tabs>
+
+### CMake
+
+[CMake](https://cmake.org/) version 3.17.2 is known to work. Newer versions may fail.
+
+### Perl
+
+[Perl](https://www.perl.org/) 5.10.0 or higher is required for building OpenSSL from source (OpenSSL's `Configure` script is written in Perl).
+
+- **Windows:** [Strawberry Perl](https://strawberryperl.com/) or [ActivePerl](https://www.activestate.com/products/perl/) is recommended.
+- **Linux (Debian/Ubuntu):** `sudo apt-get install perl`
+- **Linux (RHEL/CentOS):** `sudo yum install perl`
+- **Linux (Fedora):** `sudo dnf install perl`
+
+Verify with `perl -v`.
+
+### Cryptography libraries
+
+| Library | Version | Notes |
+|---------|---------|-------|
+| [Mbed TLS](https://tls.mbed.org) | 3.6.5 | Included as a submodule. SMx, EdDSA, ML-DSA, SLH-DSA, and ML-KEM are not supported. |
+| [OpenSSL](https://www.openssl.org) | 3.5.5 | Included as a submodule. SM2-KeyExchange and SM4_GCM are not supported. |
+
+### Unit test framework
+
+[cmocka](https://cmocka.org/) version 1.1.7 — included as a submodule.
+
+---
+
+## CMake parameters
+
+| Parameter | Values | Description |
+|-----------|--------|-------------|
+| `ARCH` | `x64`, `ia32`, `arm`, `aarch64`, `riscv32`, `riscv64` | Target CPU architecture |
+| `TOOLCHAIN` | `VS2022`, `VS2019`, `GCC`, `CLANG` | Compiler toolchain (platform-dependent) |
+| `TARGET` | `Debug`, `Release` | Build type. `Release` disables all debug assertions and prints. |
+| `CRYPTO` | `mbedtls`, `openssl` | Cryptography backend |
+
+---
+
+## Building
+
+### Initialize submodules
+
+libspdm uses submodules for Mbed TLS, OpenSSL, and cmocka. Run this once after cloning:
+
+```bash
+git submodule update --init
+```
+
+To update submodules after a repository update:
+
+```bash
+git submodule update
+```
+
+### Windows builds (IA32/X64)
+
+Use the matching Visual Studio command prompt for your target architecture:
+
+- IA32: `x86 Native Tools Command Prompt for Visual Studio`
+- X64: `x64 Native Tools Command Prompt for Visual Studio`
+
+General build steps:
+
+```bash
+cd libspdm
+mkdir build
+cd build
+cmake -G"NMake Makefiles" -DARCH=<x64|ia32> -DTOOLCHAIN=<VS2022|VS2019|VS2015|CLANG> -DTARGET=<Debug|Release> -DCRYPTO=<mbedtls|openssl> ..
+nmake copy_sample_key
+nmake
+```
+
+Example CMake invocations:
+
+```bash
+cmake -G"NMake Makefiles" -DARCH=x64 -DTOOLCHAIN=VS2019 -DTARGET=Debug -DCRYPTO=mbedtls ..
+```
+
+```bash
+cmake -G"NMake Makefiles" -DARCH=x64 -DTOOLCHAIN=VS2019 -DTARGET=Release -DCRYPTO=mbedtls ..
+```
+
+```bash
+cmake -G"NMake Makefiles" -DARCH=x64 -DTOOLCHAIN=VS2019 -DTARGET=Debug -DCRYPTO=openssl ..
+```
+
+```bash
+cmake -G"NMake Makefiles" -DARCH=x64 -DTOOLCHAIN=VS2019 -DTARGET=Release -DCRYPTO=openssl ..
+```
+
+CMake can also generate Visual Studio project files directly:
+
+```bash
+cmake -G"Visual Studio 16 2019" -DARCH=x64 -DTOOLCHAIN=VS2019 -DTARGET=Release -DCRYPTO=mbedtls ..
+```
+
+### Linux builds (IA32/X64)
+
+General build steps:
+
+```bash
+cd libspdm
+mkdir build
+cd build
+cmake -DARCH=<x64|ia32|arm|aarch64|riscv32|riscv64|arc> -DTOOLCHAIN=<GCC|CLANG> -DTARGET=<Debug|Release> -DCRYPTO=<mbedtls|openssl> ..
+make copy_sample_key
+make
+```
+
+Example CMake invocations:
+
+```bash
+cmake -DARCH=ia32 -DTOOLCHAIN=GCC -DTARGET=Debug -DCRYPTO=openssl ..
+```
+
+```bash
+cmake -DARCH=ia32 -DTOOLCHAIN=GCC -DTARGET=Release -DCRYPTO=openssl ..
+```
+
+```bash
+cmake -DARCH=arm -DTOOLCHAIN=GCC -DTARGET=Debug -DCRYPTO=openssl ..
+```
+
+```bash
+cmake -DARCH=x64 -DTOOLCHAIN=CLANG -DTARGET=Release -DCRYPTO=mbedtls ..
+```
+
+---
+
+## OpenSSL binary build
+
+By default libspdm builds OpenSSL from source using the included submodule. If you have a pre-compiled OpenSSL installation, you can link against it directly using `ENABLE_BINARY_BUILD`.
+
+First install OpenSSL, then pass the paths to the compiled libraries:
+
+**Windows:**
+
+```bash
+cmake -G"Visual Studio 16 2019" -DARCH=x64 -DTOOLCHAIN=VS2019 -DTARGET=Release -DCRYPTO=openssl \
+  -DENABLE_BINARY_BUILD=1 \
+  -DCOMPILED_LIBCRYPTO_PATH=<OPENSSL_PATH>/libcrypto.lib \
+  -DCOMPILED_LIBSSL_PATH=<OPENSSL_PATH>/libssl.lib ..
+```
+
+**Linux:**
+
+```bash
+cmake -DARCH=x64 -DTOOLCHAIN=GCC -DTARGET=Release -DCRYPTO=openssl \
+  -DENABLE_BINARY_BUILD=1 \
+  -DCOMPILED_LIBCRYPTO_PATH=<OPENSSL_PATH>/libcrypto.a \
+  -DCOMPILED_LIBSSL_PATH=<OPENSSL_PATH>/libssl.a ..
+```
+
+| CMake Variable | Description |
+|----------------|-------------|
+| `ENABLE_BINARY_BUILD` | Set to `1` to link against a pre-built OpenSSL instead of building from source |
+| `COMPILED_LIBCRYPTO_PATH` | Absolute path to the compiled `libcrypto` library (`.lib` on Windows, `.a` on Linux) |
+| `COMPILED_LIBSSL_PATH` | Absolute path to the compiled `libssl` library (`.lib` on Windows, `.a` on Linux) |
+
+---
+
+## Cross-compilation
+
+libspdm supports cross-compilation for ARM, AArch64, and RISC-V targets. Full toolchain setup instructions are in [doc/build.md](https://github.com/DMTF/libspdm/blob/main/doc/build.md).
+
+**ARM / AArch64 (ARM DS2022, Linux):**
+
+```bash
+cmake -DARCH=arm -DTOOLCHAIN=ARM_DS2022 -DTARGET=Debug -DCRYPTO=mbedtls ..
+```
+
+```bash
+cmake -DARCH=aarch64 -DTOOLCHAIN=ARM_DS2022 -DTARGET=Release -DCRYPTO=mbedtls ..
+```
+
+**ARM (ARM GNU toolchain, Linux):**
+
+```bash
+cmake -DARCH=arm -DTOOLCHAIN=ARM_GNU -DTARGET=Debug -DCRYPTO=mbedtls ..
+```
+
+```bash
+cmake -DARCH=aarch64 -DTOOLCHAIN=ARM_GNU -DTARGET=Release -DCRYPTO=mbedtls ..
+```
+
+**ARM bare metal (ARM GNU bare metal toolchain):**
+
+```bash
+cmake -DARCH=arm -DMARCH=armv7e-m -DTOOLCHAIN=ARM_GNU_BARE_METAL -DTARGET=Debug -DCRYPTO=mbedtls ..
+```
+
+**RISC-V 32-bit (RISCV XPACK, Linux):**
+
+```bash
+cmake -DARCH=riscv32 -DTOOLCHAIN=RISCV_XPACK -DTARGET=Debug -DCRYPTO=mbedtls ..
+```
+
+**RISC-V embedded (baremetal, no Linux):**
+
+```bash
+cmake -DARCH=riscv32 -DTOOLCHAIN=RISCV_NONE -DTARGET=Debug -DCRYPTO=mbedtls -DDISABLE_TESTS=1 ..
+```
+
+Use `make -j` with any of the above to parallelize the build.
+
+---
+
+## Architecture support
+
+### Windows
+
+| Toolchain | ia32 | x64 | arm | aarch64 | riscv32 | riscv64 |
+|-----------|------|-----|-----|---------|---------|---------|
+| VS2015 | cl | cl | — | — | — | — |
+| VS2019 | cl | cl | — | — | — | — |
+| VS2022 | cl | cl | — | — | — | — |
+| ARM_DS2022 | — | — | armclang | armclang | — | — |
+| GCC | gcc | gcc | — | — | — | — |
+| CLANG | clang-cl | clang-cl | — | — | — | — |
+
+### Linux
+
+| Toolchain | ia32 | x64 | arm | aarch64 | riscv32 | riscv64 | loongarch64 |
+|-----------|------|-----|-----|---------|---------|---------|-------------|
+| GCC | gcc | gcc | — | — | — | — | — |
+| CLANG | clang | clang | — | — | — | — | — |
+| ARM_DS2022 | — | — | armclang | armclang | — | — | — |
+| ARM_GNU | — | — | arm-none-linux-gnueabihf-gcc | aarch64-none-linux-gnu-gcc | — | — | — |
+| ARM_GNU_BARE_METAL | — | — | arm-none-eabi | aarch64-none-elf | — | — | — |
+| ARM_GCC | — | — | arm-linux-gnueabi-gcc | — | — | — | — |
+| AARCH64_GCC | — | — | — | aarch64-linux-gnu-gcc | — | — | — |
+| RISCV_GNU | — | — | — | — | riscv32-unknown-linux-gnu-gcc | riscv64-unknown-linux-gnu-gcc | — |
+| RISCV64_GCC | — | — | — | — | — | riscv64-linux-gnu-gcc | — |
+| RISCV_XPACK | — | — | — | — | riscv-none-elf-gcc | riscv-none-elf-gcc | — |
+| RISCV_NONE | — | — | — | — | riscv64-elf-gcc | riscv64-elf-gcc | — |
+| LOONGARCH64_GNU | — | — | — | — | — | — | loongarch64-unknown-linux-gnu-gcc |
+
+---
+
+## Shared library builds (Linux)
+
+libspdm supports building as shared libraries with `pkg-config` integration:
+
+```bash
+cmake -DARCH=x64 -DTOOLCHAIN=GCC -DTARGET=Release -DCRYPTO=mbedtls -DBUILD_LINUX_SHARED_LIB=ON ..
+```
+
+This produces three shared libraries:
+
+- `libspdm.so` — core library (all subprojects from the `library` folder)
+- `libspdm_platform.so` — platform code from `os_stub` (memory allocation, RNG, etc.)
+- `libspdm_crypto.so` — cryptography wrapper for dynamic linking to Mbed TLS or OpenSSL
+
+To compile and link an application against the installed libraries:
+
+```bash
+gcc `pkg-config --cflags libspdm` -c libspdm_app.c -o libspdm_app.o
+gcc libspdm_app.o `pkg-config --libs libspdm` -o libspdm_app
+```
+
+---
+
+## Disabling tests
+
+Unit tests and fuzz tests can be excluded from the build to reduce build time in production or embedded scenarios:
+
+```bash
+cmake ... -DDISABLE_TESTS=1 ..
+```

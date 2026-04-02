@@ -1,0 +1,101 @@
+---
+title: "Threat Model"
+description: "Trust domains, responsibilities, and security threats across the libspdm library stack."
+---
+
+libspdm is structured into five trust levels. Each level has distinct responsibilities, a defined set of external inputs, and a corresponding threat surface. Higher-numbered levels are exposed to more untrusted input; lower levels handle the most sensitive secrets.
+
+<Warning>
+  **Level 1 handles device private keys and PSKs.** The implementation of `asymsignlib` and `psklib` must run in a secure environment (e.g., a hardware security module or trusted execution environment). A compromise at this level enables an attacker to impersonate the device, forge signatures, or decrypt past sessions.
+</Warning>
+
+## Trust Levels
+
+<AccordionGroup>
+  <Accordion title="Level 1 — Persistent Secret Handling">
+    **Libraries:** `(req)asymsignlib`, `psklib` (device-specific)
+
+    | Attribute        | Detail |
+    |------------------|--------|
+    | Responsibilities | Access the device private key and sign messages; access the PSK and HMAC messages |
+    | API surface      | Sign data with private key; HMAC data with PSK |
+    | External inputs  | None |
+    | Internal inputs  | Data to be signed; data to be HMACed |
+
+    **Threats**
+    - **Information disclosure** — private key or PSK exfiltrated
+    - **Elevation of privilege** — attacker gains signing capability to impersonate the device
+    - **Tampering with data** — signed or HMACed values are substituted
+  </Accordion>
+
+  <Accordion title="Level 2 — Ephemeral Secret Handling">
+    **Library:** `spdm_secured_message_lib` (crypto-engine-specific or common)
+
+    | Attribute        | Detail |
+    |------------------|--------|
+    | Responsibilities | Generate DH secret and derive session keys; handle key update; encrypt and decrypt SPDM secured messages |
+    | API surface      | Generate DH secret; manage SPDM session; encrypt/decrypt secured messages |
+    | External inputs  | Cipher messages to be decrypted *(potentially malicious)* |
+    | Internal inputs  | Plain messages to be encrypted; internal SPDM session context |
+
+    **Threats**
+    - **Information disclosure** — session keys or plaintext extracted
+    - **Elevation of privilege** — attacker injects or replays decrypted content
+    - **Tampering with data** — decrypted message content is modified
+    - **Denial of service** — malformed cipher input causes crash or hang
+  </Accordion>
+
+  <Accordion title="Level 3 — SPDM Message Processing">
+    **Libraries:** `spdm_common_lib`, `spdm_requester_lib`, `spdm_responder_lib` (common)
+
+    | Attribute        | Detail |
+    |------------------|--------|
+    | Responsibilities | Build and process SPDM messages |
+    | API surface      | Build SPDM messages; process SPDM messages |
+    | External inputs  | Received SPDM messages *(potentially malicious)* |
+    | Internal inputs  | SPDM messages to be sent; internal SPDM context |
+
+    **Threats**
+    - **Tampering with data** — received messages are crafted to alter device state
+    - **Denial of service** — malformed SPDM messages trigger unbounded processing or assertion failures
+  </Accordion>
+
+  <Accordion title="Level 4 — Transport Layer">
+    **Libraries:** `SpdmTransportMctpLib`, `SpdmTransportPciDoeLib` (transport-layer-specific)
+
+    | Attribute        | Detail |
+    |------------------|--------|
+    | Responsibilities | Build and process SPDM transport layer messages |
+    | API surface      | Build transport layer messages; process transport layer messages |
+    | External inputs  | Received SPDM transport layer messages *(potentially malicious)* |
+    | Internal inputs  | SPDM transport layer messages to be sent |
+
+    **Threats**
+    - **Tampering with data** — transport framing is manipulated before reaching Level 3
+    - **Denial of service** — malformed transport frames cause processing failures
+  </Accordion>
+
+  <Accordion title="Level 5 — Device I/O">
+    **Functions:** `SPDM_DEVICE_SEND_MESSAGE_FUNC`, `SPDM_DEVICE_RECEIVE_MESSAGE_FUNC` (device-specific)
+
+    | Attribute        | Detail |
+    |------------------|--------|
+    | Responsibilities | Send and receive raw SPDM messages to/from the hardware device |
+    | API surface      | Send SPDM messages to the device; receive SPDM messages from the device |
+    | External inputs  | Hardware device I/O *(potentially malicious)* |
+    | Internal inputs  | None |
+
+    **Threats**
+    - **Denial of service** — a misbehaving device stalls or floods the I/O path
+  </Accordion>
+</AccordionGroup>
+
+## Summary Table
+
+| Level | Library / Component | Key Responsibility | Threats |
+|-------|---------------------|--------------------|---------|
+| 1 | `asymsignlib`, `psklib` | Private key signing; PSK HMAC | Information disclosure, Elevation of privilege, Tampering |
+| 2 | `spdm_secured_message_lib` | DH key exchange; session encrypt/decrypt | Information disclosure, Elevation of privilege, Tampering, DoS |
+| 3 | `spdm_common/requester/responder_lib` | SPDM message build & process | Tampering, DoS |
+| 4 | `SpdmTransportMctpLib` / `PciDoeLib` | Transport framing | Tampering, DoS |
+| 5 | `SEND/RECEIVE_MESSAGE_FUNC` | Hardware I/O | DoS |

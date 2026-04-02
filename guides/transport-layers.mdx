@@ -1,0 +1,179 @@
+---
+title: "Transport Layers"
+description: "How to configure MCTP and PCI DOE transport layers in libspdm, including buffer registration."
+keywords: ["spdm", "mctp", "pci doe", "transport", "libspdm", "encode", "decode"]
+---
+
+libspdm ships two built-in transport layer implementations. Choose the one that matches
+your physical interconnect, then register it alongside your device buffer callbacks.
+
+## MCTP
+
+Management Component Transport Protocol (MCTP) is used in server and data-center
+management contexts (DSP0236).
+
+**Header size constants:**
+
+```c
+/*
+ * Required sender/receiver buffer overhead for MCTP:
+ *
+ * +-------+--------+---------------------------+------+--+------+---+--------+-----+
+ * | TYPE  |TransHdr|      EncryptionHeader     |AppHdr|  |Random|MAC|AlignPad|FINAL|
+ * |       |        |SessionId|SeqNum|Len|AppLen|      |  |      |   |        |     |
+ * +-------+--------+---------------------------+------+  +------+---+--------+-----+
+ * | MCTP  |    1   |    4    |   2  | 2 |   2  |   1  |  |  32  | 16|   0    |  60 |
+ * +-------+--------+---------------------------+------+--+------+---+--------+-----+
+ */
+#define LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE  (2 + 8 + LIBSPDM_MCTP_SEQUENCE_NUMBER_COUNT)
+#define LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE    (LIBSPDM_MCTP_MAX_RANDOM_NUMBER_COUNT + \
+                                             LIBSPDM_MAX_AEAD_TAG_SIZE + \
+                                             (LIBSPDM_MCTP_ALIGNMENT - 1))
+```
+
+**Encode and decode functions:**
+
+```c
+/*
+ * Encode an SPDM or APP message into an MCTP transport message.
+ * For a secured message, encrypts first, then wraps with the transport header.
+ */
+libspdm_return_t libspdm_transport_mctp_encode_message(
+    void *spdm_context, const uint32_t *session_id, bool is_app_message,
+    bool is_requester, size_t message_size, void *message,
+    size_t *transport_message_size, void **transport_message);
+
+/*
+ * Decode an MCTP transport message back to an SPDM or APP message.
+ * For a secured message, strips the transport header, then decrypts and verifies.
+ */
+libspdm_return_t libspdm_transport_mctp_decode_message(
+    void *spdm_context, uint32_t **session_id,
+    bool *is_app_message, bool is_requester,
+    size_t transport_message_size, void *transport_message,
+    size_t *message_size, void **message);
+```
+
+**Registration example:**
+
+```c
+libspdm_register_transport_layer_func(
+    spdm_context,
+    LIBSPDM_MAX_SPDM_MSG_SIZE,          /* defined by the Integrator */
+    LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE,
+    LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE,
+    libspdm_transport_mctp_encode_message,
+    libspdm_transport_mctp_decode_message);
+```
+
+MCTP uses a 2-byte sequence number (`LIBSPDM_MCTP_SEQUENCE_NUMBER_COUNT = 2`) and up to 32
+random bytes (`LIBSPDM_MCTP_MAX_RANDOM_NUMBER_COUNT = 32`) in secured messages.
+
+---
+
+## PCI DOE
+
+PCI Data Object Exchange (DOE) is defined in the PCIe Base Specification section 6.30 and
+used for device attestation over PCIe.
+
+**Header size constants:**
+
+```c
+/*
+ * Required sender/receiver buffer overhead for PCI DOE:
+ *
+ * +-------+--------+---------------------------+------+--+------+---+--------+-----+
+ * | TYPE  |TransHdr|      EncryptionHeader     |AppHdr|  |Random|MAC|AlignPad|FINAL|
+ * |       |        |SessionId|SeqNum|Len|AppLen|      |  |      |   |        |     |
+ * +-------+--------+---------------------------+------+  +------+---+--------+-----+
+ * |PCI_DOE|    8   |    4    |   0  | 2 |   2  |   0  |  |   0  | 16|   3    |  35 |
+ * +-------+--------+---------------------------+------+--+------+---+--------+-----+
+ */
+#define LIBSPDM_PCI_DOE_TRANSPORT_HEADER_SIZE  (8 + 8 + \
+                                                LIBSPDM_PCI_DOE_SEQUENCE_NUMBER_COUNT)
+#define LIBSPDM_PCI_DOE_TRANSPORT_TAIL_SIZE    (LIBSPDM_PCI_DOE_MAX_RANDOM_NUMBER_COUNT + \
+                                                LIBSPDM_MAX_AEAD_TAG_SIZE + \
+                                                (LIBSPDM_PCI_DOE_ALIGNMENT - 1))
+```
+
+PCI DOE uses no sequence number (`LIBSPDM_PCI_DOE_SEQUENCE_NUMBER_COUNT = 0`) and no random
+bytes (`LIBSPDM_PCI_DOE_MAX_RANDOM_NUMBER_COUNT = 0`). The alignment padding is 3 bytes
+(`LIBSPDM_PCI_DOE_ALIGNMENT = 4`).
+
+**Encode and decode functions:**
+
+```c
+/*
+ * Encode an SPDM or APP message into a PCI DOE transport message.
+ * For a secured message, encrypts first, then wraps with the DOE data object header.
+ */
+libspdm_return_t libspdm_transport_pci_doe_encode_message(
+    void *spdm_context, const uint32_t *session_id, bool is_app_message,
+    bool is_requester, size_t message_size, void *message,
+    size_t *transport_message_size, void **transport_message);
+
+/*
+ * Decode a PCI DOE transport message back to an SPDM or APP message.
+ * For a secured message, strips the DOE header, then decrypts and verifies.
+ */
+libspdm_return_t libspdm_transport_pci_doe_decode_message(
+    void *spdm_context, uint32_t **session_id,
+    bool *is_app_message, bool is_requester,
+    size_t transport_message_size, void *transport_message,
+    size_t *message_size, void **message);
+```
+
+**Registration example:**
+
+```c
+libspdm_register_transport_layer_func(
+    spdm_context,
+    LIBSPDM_MAX_SPDM_MSG_SIZE,               /* defined by the Integrator */
+    LIBSPDM_PCI_DOE_TRANSPORT_HEADER_SIZE,
+    LIBSPDM_PCI_DOE_TRANSPORT_TAIL_SIZE,
+    libspdm_transport_pci_doe_encode_message,
+    libspdm_transport_pci_doe_decode_message);
+```
+
+PCI DOE also provides helpers for the DOE discovery protocol:
+
+```c
+/* Encode a DOE Discovery request */
+libspdm_return_t libspdm_pci_doe_encode_discovery(
+    size_t message_size, void *message,
+    size_t *transport_message_size, void **transport_message);
+
+/* Decode a DOE Discovery request to get the index */
+libspdm_return_t libspdm_pci_doe_decode_discovery_request(
+    size_t transport_message_size, const void *transport_message,
+    uint8_t *index);
+
+/* Decode a DOE Discovery response */
+libspdm_return_t libspdm_pci_doe_decode_discovery_response(
+    size_t transport_message_size, void *transport_message,
+    uint16_t *vendor_id, uint8_t *protocol, uint8_t *next_index);
+```
+
+---
+
+## Device buffer registration
+
+Both transport layers require the Integrator to supply sender and receiver buffer
+callbacks via `libspdm_register_device_buffer_func`. The final transmitted and received
+messages are placed in these buffers.
+
+```c
+libspdm_register_device_buffer_func(
+    spdm_context,
+    LIBSPDM_SENDER_BUFFER_SIZE,         /* defined by the Integrator */
+    LIBSPDM_RECEIVER_BUFFER_SIZE,       /* defined by the Integrator */
+    spdm_device_acquire_sender_buffer,
+    spdm_device_release_sender_buffer,
+    spdm_device_acquire_receiver_buffer,
+    spdm_device_release_receiver_buffer);
+```
+
+The acquire callbacks return a pointer to a DMA-accessible buffer. The release callbacks
+are called after the send or receive operation completes. Size the sender and receiver
+buffers to hold at least `LIBSPDM_MAX_SPDM_MSG_SIZE` plus the transport header and tail
+overhead for your chosen transport.

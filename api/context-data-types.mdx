@@ -1,0 +1,351 @@
+---
+title: "Context Data Types"
+description: "Reference for libspdm_data_type_t enum values used with libspdm_set_data and libspdm_get_data."
+---
+
+`libspdm_data_type_t` is the enumeration passed as the `data_type` argument to `libspdm_set_data` and `libspdm_get_data`. Each value controls a distinct element of the SPDM context.
+
+Each entry below notes:
+- **Access**: `get`, `set`, or `get/set`
+- **Location**: which `libspdm_data_location_t` values apply (`LOCAL`, `CONNECTION`, or `SESSION`)
+
+The `parameter.location` field must be set to `LIBSPDM_DATA_LOCATION_LOCAL` when writing or reading local endpoint data, and `LIBSPDM_DATA_LOCATION_CONNECTION` when reading negotiated peer data. `LIBSPDM_DATA_LOCATION_SESSION` is used for session-specific queries and requires `parameter.additional_data` to hold the session ID.
+
+---
+
+## Connection & Version
+
+<Accordion title="LIBSPDM_DATA_SPDM_VERSION">
+
+The SPDM specification version(s) (DSP0274) supported by an endpoint: 1.0, 1.1, 1.2, or 1.3. Communicated in `GET_VERSION / VERSION` messages.
+
+**Access**: get/set
+
+**Locations**
+
+- `LIBSPDM_DATA_LOCATION_LOCAL` — The SPDM version(s) supported by the local endpoint. Multiple entries are allowed; libspdm will advertise all of them in `VERSION`.
+- `LIBSPDM_DATA_LOCATION_CONNECTION` — The single SPDM version selected for this connection (set by libspdm after a successful `GET_VERSION` exchange). Only one entry; multiple not allowed.
+
+```c
+/* Advertise support for SPDM 1.2 and 1.3 */
+spdm_version_number_t versions[2] = {
+    SPDM_MESSAGE_VERSION_12 << SPDM_VERSION_NUMBER_SHIFT_BIT,
+    SPDM_MESSAGE_VERSION_13 << SPDM_VERSION_NUMBER_SHIFT_BIT,
+};
+libspdm_data_parameter_t param = { .location = LIBSPDM_DATA_LOCATION_LOCAL };
+libspdm_set_data(ctx, LIBSPDM_DATA_SPDM_VERSION, &param,
+                 versions, sizeof(versions));
+```
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_SECURED_MESSAGE_VERSION">
+
+The SPDM secured message specification version(s) (DSP0277) supported by the local endpoint: 1.0, 1.1, or 1.2. Negotiated through the opaque data fields in `KEY_EXCHANGE / KEY_EXCHANGE_RSP` or `PSK_EXCHANGE / PSK_EXCHANGE_RSP`.
+
+**Access**: set only (use `LIBSPDM_DATA_SESSION_SECURED_MESSAGE_VERSION` to read the negotiated version after session establishment)
+
+**Locations**
+
+- `LIBSPDM_DATA_LOCATION_LOCAL` — The secured message version(s) of the local endpoint. Multiple entries are allowed.
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_CONNECTION_STATE">
+
+The current connection state shared between the two endpoints.
+
+**Access**: get/set
+
+**Locations**: Not location-sensitive; the `LIBSPDM_DATA_LOCATION_*` value is ignored.
+
+**Values**
+
+| Constant | Description |
+|---|---|
+| `LIBSPDM_CONNECTION_STATE_NOT_STARTED` | Initial state after context initialization or reset. |
+| `LIBSPDM_CONNECTION_STATE_AFTER_VERSION` | After successful `GET_VERSION / VERSION`. |
+| `LIBSPDM_CONNECTION_STATE_AFTER_CAPABILITIES` | After successful `GET_CAPABILITIES / CAPABILITIES`. |
+| `LIBSPDM_CONNECTION_STATE_NEGOTIATED` | After successful `NEGOTIATE_ALGORITHMS / ALGORITHMS`. |
+| `LIBSPDM_CONNECTION_STATE_AFTER_DIGESTS` | After successful `GET_DIGESTS / DIGESTS`. |
+| `LIBSPDM_CONNECTION_STATE_AFTER_CERTIFICATE` | After successful `GET_CERTIFICATE / CERTIFICATE`. |
+| `LIBSPDM_CONNECTION_STATE_AUTHENTICATED` | After successful `CHALLENGE / CHALLENGE_AUTH`. |
+
+```c
+libspdm_data_parameter_t param = { .location = LIBSPDM_DATA_LOCATION_LOCAL };
+libspdm_connection_state_t state;
+size_t size = sizeof(state);
+libspdm_get_data(ctx, LIBSPDM_DATA_CONNECTION_STATE, &param, &state, &size);
+```
+
+</Accordion>
+
+---
+
+## Capabilities
+
+<Accordion title="LIBSPDM_DATA_CAPABILITY_FLAGS">
+
+Bitmask of SPDM capabilities. Communicated in `GET_CAPABILITIES / CAPABILITIES` messages. Fields are defined by the `SPDM_GET_CAPABILITIES_*` macros.
+
+**Access**: get/set
+
+**Locations**
+
+- `LIBSPDM_DATA_LOCATION_LOCAL` — Capabilities of the local endpoint.
+- `LIBSPDM_DATA_LOCATION_CONNECTION` — Capabilities of the peer endpoint (available after `GET_CAPABILITIES` exchange).
+
+```c
+uint32_t flags = SPDM_GET_CAPABILITIES_REQUEST_FLAGS_CERT_CAP
+               | SPDM_GET_CAPABILITIES_REQUEST_FLAGS_CHAL_CAP
+               | SPDM_GET_CAPABILITIES_REQUEST_FLAGS_ENCRYPT_CAP
+               | SPDM_GET_CAPABILITIES_REQUEST_FLAGS_MAC_CAP
+               | SPDM_GET_CAPABILITIES_REQUEST_FLAGS_KEY_EX_CAP;
+libspdm_data_parameter_t param = { .location = LIBSPDM_DATA_LOCATION_LOCAL };
+libspdm_set_data(ctx, LIBSPDM_DATA_CAPABILITY_FLAGS, &param,
+                 &flags, sizeof(flags));
+```
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_CAPABILITY_CT_EXPONENT">
+
+`CTExponent` controls the maximum cryptographic processing time `CT = 2^CTExponent` microseconds. libspdm enforces a maximum of `LIBSPDM_MAX_CT_EXPONENT`.
+
+**Access**: get/set
+
+**Locations**
+
+- `LIBSPDM_DATA_LOCATION_LOCAL` — The `CTExponent` value of the local endpoint.
+- `LIBSPDM_DATA_LOCATION_CONNECTION` — The `CTExponent` value of the peer endpoint.
+
+```c
+uint8_t ct_exp = 14; /* CT = 2^14 = 16 384 µs */
+libspdm_data_parameter_t param = { .location = LIBSPDM_DATA_LOCATION_LOCAL };
+libspdm_set_data(ctx, LIBSPDM_DATA_CAPABILITY_CT_EXPONENT, &param,
+                 &ct_exp, sizeof(ct_exp));
+```
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_CAPABILITY_RTT_US">
+
+Round-trip transport timing (`RTT`) in microseconds. Used only by a Requester.
+
+- As the `timeout` passed to `libspdm_device_send_message_func` (worst-case send timeout).
+- Added to the Responder's `CT` or `ST1` value to compute the receive timeout passed to `libspdm_device_receive_message_func`.
+
+**Access**: get/set
+
+**Locations**
+
+- `LIBSPDM_DATA_LOCATION_LOCAL` — The RTT value as measured or estimated by the Requester.
+
+```c
+uint64_t rtt_us = 10000; /* 10 ms */
+libspdm_data_parameter_t param = { .location = LIBSPDM_DATA_LOCATION_LOCAL };
+libspdm_set_data(ctx, LIBSPDM_DATA_CAPABILITY_RTT_US, &param,
+                 &rtt_us, sizeof(rtt_us));
+```
+
+</Accordion>
+
+---
+
+## Algorithms
+
+<Accordion title="LIBSPDM_DATA_MEASUREMENT_SPEC">
+
+Measurement specification(s) supported by an endpoint. Negotiated in `NEGOTIATE_ALGORITHMS / ALGORITHMS`. The SPDM specification currently defines only `DMTFmeasSpec`. Set to `0` if the Requester will not retrieve measurements.
+
+**Access**: get/set
+
+**Locations**: `LOCAL` (local endpoint), `CONNECTION` (peer endpoint after negotiation).
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_MEASUREMENT_HASH_ALGO">
+
+Hash algorithm used to hash Responder measurements. Bitmask using `SPDM_ALGORITHMS_MEASUREMENT_HASH_ALGO_*` macros. `SPDM_ALGORITHMS_MEASUREMENT_HASH_ALGO_RAW_BIT_STREAM_ONLY` means the Responder cannot hash measurements.
+
+**Access**: get/set
+
+**Locations**: `LOCAL`, `CONNECTION`.
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_BASE_ASYM_ALGO">
+
+Asymmetric algorithm used by the **Responder** to sign messages. Bitmask using `SPDM_ALGORITHMS_BASE_ASYM_ALGO_*` macros.
+
+**Access**: get/set
+
+**Locations**: `LOCAL` (algorithm(s) supported locally), `CONNECTION` (algorithm selected for this connection).
+
+```c
+uint32_t asym = SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_ECDSA_ECC_NIST_P256;
+libspdm_data_parameter_t param = { .location = LIBSPDM_DATA_LOCATION_LOCAL };
+libspdm_set_data(ctx, LIBSPDM_DATA_BASE_ASYM_ALGO, &param,
+                 &asym, sizeof(asym));
+```
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_BASE_HASH_ALGO">
+
+Hash algorithm used to hash transcripts. Bitmask using `SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_*` macros.
+
+**Access**: get/set
+
+**Locations**: `LOCAL`, `CONNECTION`.
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_DHE_NAME_GROUP">
+
+Diffie-Hellman group used for key exchange. Bitmask using `SPDM_ALGORITHMS_DHE_NAMED_GROUP_*` macros.
+
+**Access**: get/set
+
+**Locations**: `LOCAL`, `CONNECTION`.
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_AEAD_CIPHER_SUITE">
+
+AEAD algorithm used for symmetric encryption within a session. Bitmask using `SPDM_ALGORITHMS_AEAD_CIPHER_SUITE_*` macros.
+
+**Access**: get/set
+
+**Locations**: `LOCAL`, `CONNECTION`.
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_REQ_BASE_ASYM_ALG">
+
+Asymmetric algorithm used by the **Requester** to sign messages (mutual authentication). Bitmask using `SPDM_ALGORITHMS_BASE_ASYM_ALGO_*` macros.
+
+**Access**: get/set
+
+**Locations**: `LOCAL`, `CONNECTION`.
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_KEY_SCHEDULE">
+
+Key schedule used for both symmetric and asymmetric key exchange. Negotiated in `NEGOTIATE_ALGORITHMS / ALGORITHMS`. Bitmask using `SPDM_ALGORITHMS_KEY_SCHEDULE_*` macros.
+
+**Access**: get/set
+
+**Locations**: `LOCAL`, `CONNECTION`.
+
+</Accordion>
+
+---
+
+## Certificates & Keys
+
+<Accordion title="LIBSPDM_DATA_PEER_PUBLIC_ROOT_CERT">
+
+One or more trusted root certificates used to validate the peer's certificate chain. Each certificate must be ASN.1 DER-encoded. Call `libspdm_set_data` once per root certificate; up to `LIBSPDM_MAX_ROOT_CERT_SUPPORT` certificates may be stored.
+
+**Access**: set only
+
+**Locations**: `LOCAL`.
+
+```c
+libspdm_data_parameter_t param = { .location = LIBSPDM_DATA_LOCATION_LOCAL };
+libspdm_set_data(ctx, LIBSPDM_DATA_PEER_PUBLIC_ROOT_CERT, &param,
+                 root_cert_der, root_cert_der_size);
+```
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN">
+
+One or more SPDM certificate chains to present in `CERTIFICATE` response messages. Use `parameter.additional_data[0]` to specify the slot ID (0–7) for each chain. The chain must conform to the `spdm_cert_chain_t` structure defined in `spdm.h`.
+
+**Access**: set only
+
+**Locations**: `LOCAL`.
+
+```c
+libspdm_data_parameter_t param = { .location = LIBSPDM_DATA_LOCATION_LOCAL };
+param.additional_data[0] = 0; /* slot 0 */
+libspdm_set_data(ctx, LIBSPDM_DATA_LOCAL_PUBLIC_CERT_CHAIN, &param,
+                 cert_chain, cert_chain_size);
+```
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_PEER_PUBLIC_KEY">
+
+Raw public key of a peer endpoint, used when the endpoint does not support certificate chains. The key is ASN.1 DER-encoded `SubjectPublicKeyInfo` as described in RFC 7250.
+
+**Access**: set only
+
+**Locations**: `LOCAL`.
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_LOCAL_PUBLIC_KEY">
+
+Raw public key of the local endpoint. Format is ASN.1 DER-encoded `SubjectPublicKeyInfo` (RFC 7250).
+
+**Access**: set only
+
+**Locations**: `LOCAL`.
+
+</Accordion>
+
+---
+
+## Session
+
+<Accordion title="LIBSPDM_DATA_MAX_DHE_SESSION_COUNT">
+
+Maximum number of concurrent secure sessions established via asymmetric key exchange (`KEY_EXCHANGE`). Set to `0` for no limit beyond `LIBSPDM_MAX_SESSION_COUNT`. If modified while sessions are active, existing sessions are not terminated.
+
+**Access**: get/set
+
+**Locations**: `LOCAL`.
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_MAX_PSK_SESSION_COUNT">
+
+Maximum number of concurrent secure sessions established via symmetric key exchange (`PSK_EXCHANGE`). Set to `0` for no limit beyond `LIBSPDM_MAX_SESSION_COUNT`. The sum of the DHE and PSK session limits cannot exceed `LIBSPDM_MAX_SESSION_COUNT`.
+
+**Access**: get/set
+
+**Locations**: `LOCAL`.
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_HEARTBEAT_PERIOD">
+
+Responder's `HeartbeatPeriod` in seconds. Communicated to the Requester in `KEY_EXCHANGE_RSP` and `PSK_EXCHANGE_RSP`. The actual session timeout is `2 × HeartbeatPeriod`.
+
+**Access**: get/set
+
+**Locations**: `LOCAL`.
+
+</Accordion>
+
+<Accordion title="LIBSPDM_DATA_MUT_AUTH_REQUESTED">
+
+Specifies whether the Responder requires session-based mutual authentication via asymmetric key exchange.
+
+**Access**: get/set
+
+**Locations**: `LOCAL`.
+
+**Values**
+
+| Constant | Description |
+|---|---|
+| `SPDM_KEY_EXCHANGE_RESPONSE_MUT_AUTH_REQUESTED` | Requester's public key is already provisioned; no encapsulated requests needed. |
+| `SPDM_KEY_EXCHANGE_RESPONSE_MUT_AUTH_REQUESTED_WITH_ENCAP_REQUEST` | Responder will issue `GET_CERTIFICATE` encapsulated requests to retrieve the Requester's certificate chain. |
+| `SPDM_KEY_EXCHANGE_RESPONSE_MUT_AUTH_REQUESTED_WITH_GET_DIGESTS` | Same as above, but the Responder embeds a `GET_DIGESTS` request for better performance. |
+
+</Accordion>

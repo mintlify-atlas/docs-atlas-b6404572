@@ -1,0 +1,552 @@
+---
+title: "Common API"
+description: "Core functions for initializing and configuring an SPDM context."
+---
+
+The common API provides the foundational functions every libspdm integrator must call before any SPDM communication takes place. These functions allocate and configure the `spdm_context`, register I/O and transport callbacks, and manage the scratch buffer used during message encoding and decoding.
+
+All functions return `libspdm_return_t` unless otherwise noted. `LIBSPDM_STATUS_SUCCESS` (zero) indicates success; any non-zero value indicates failure.
+
+---
+
+## Context Lifecycle
+
+<Accordion title="libspdm_get_context_size">
+
+Returns the number of bytes needed to allocate a full SPDM context, including all embedded secured message contexts.
+
+**Signature**
+```c
+size_t libspdm_get_context_size(void);
+```
+
+**Description**
+
+Allocate at least this many bytes before calling `libspdm_init_context`. The returned size covers the base `spdm_context` structure plus `LIBSPDM_MAX_SESSION_COUNT` secured message contexts appended directly after it.
+
+For a split allocation where the secured message contexts are placed in a separate (potentially protected) memory region, use `libspdm_get_context_size_without_secured_context` together with `libspdm_secured_message_get_context_size`.
+
+**Return value**
+
+Size in bytes of the combined SPDM context and all secured message contexts.
+
+```c
+void *spdm_context = malloc(libspdm_get_context_size());
+```
+
+</Accordion>
+
+<Accordion title="libspdm_init_context">
+
+Initializes an SPDM context and its embedded secured message contexts.
+
+**Signature**
+```c
+libspdm_return_t libspdm_init_context(void *spdm_context);
+```
+
+**Description**
+
+Must be called on the buffer returned by `malloc(libspdm_get_context_size())` before any other libspdm function. Sets all internal fields to their default values and initializes each secured message context that is embedded in the allocation.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context buffer. The buffer must be at least `libspdm_get_context_size()` bytes.
+</ParamField>
+
+**Return value**
+
+`LIBSPDM_STATUS_SUCCESS` on success.
+
+```c
+void *spdm_context = malloc(libspdm_get_context_size());
+libspdm_init_context(spdm_context);
+```
+
+</Accordion>
+
+<Accordion title="libspdm_deinit_context">
+
+Frees internal resources allocated by the cryptography library within a context. Does **not** free the context buffer itself.
+
+**Signature**
+```c
+void libspdm_deinit_context(void *spdm_context);
+```
+
+**Description**
+
+During connection and session establishment the cryptography library may allocate heap memory for key material. `libspdm_deinit_context` releases that memory. After calling this function the context buffer may be safely zeroed and freed by the integrator.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+```c
+libspdm_deinit_context(spdm_context);
+memset(spdm_context, 0, libspdm_get_context_size());
+free(spdm_context);
+```
+
+</Accordion>
+
+---
+
+## Scratch Buffer
+
+<Accordion title="libspdm_get_sizeof_required_scratch_buffer">
+
+Returns the number of bytes required for the scratch buffer.
+
+**Signature**
+```c
+size_t libspdm_get_sizeof_required_scratch_buffer(void *spdm_context);
+```
+
+**Description**
+
+The scratch buffer is used internally by libspdm to encode and decode SPDM messages, including decrypted secured message payloads. Its required size depends on the transport layer parameters registered via `libspdm_register_transport_layer_func` and on compile-time options such as `LIBSPDM_ENABLE_CAPABILITY_CHUNK_CAP`.
+
+This function must be called **after** `libspdm_register_transport_layer_func` so that the correct maximum message size is known.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+**Return value**
+
+Minimum scratch buffer size in bytes.
+
+```c
+size_t scratch_size = libspdm_get_sizeof_required_scratch_buffer(spdm_context);
+void *scratch = malloc(scratch_size);
+```
+
+</Accordion>
+
+<Accordion title="libspdm_set_scratch_buffer">
+
+Provides the scratch buffer to the SPDM context.
+
+**Signature**
+```c
+void libspdm_set_scratch_buffer(
+    void *spdm_context,
+    void *scratch_buffer,
+    size_t scratch_buffer_size);
+```
+
+**Description**
+
+Must be called after `libspdm_init_context` and before any SPDM communication. The scratch buffer must remain valid for the lifetime of the context. The scratch buffer may contain decrypted secured message payloads and should be treated as sensitive memory — zero it before freeing.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="scratch_buffer" type="void *" required>
+  A pointer to the scratch buffer. Must be at least `libspdm_get_sizeof_required_scratch_buffer()` bytes.
+</ParamField>
+
+<ParamField path="scratch_buffer_size" type="size_t" required>
+  Size of the scratch buffer in bytes.
+</ParamField>
+
+```c
+size_t scratch_size = libspdm_get_sizeof_required_scratch_buffer(spdm_context);
+void *scratch = malloc(scratch_size);
+libspdm_set_scratch_buffer(spdm_context, scratch, scratch_size);
+```
+
+</Accordion>
+
+---
+
+## Callback Registration
+
+<Accordion title="libspdm_register_device_io_func">
+
+Registers the send and receive I/O callbacks used by libspdm to communicate over the transport medium.
+
+**Signature**
+```c
+void libspdm_register_device_io_func(
+    void *spdm_context,
+    libspdm_device_send_message_func send_message,
+    libspdm_device_receive_message_func receive_message);
+```
+
+**Description**
+
+Must be called after `libspdm_init_context` and before any SPDM communication. The integrator implements these two callbacks to send and receive raw transport-layer messages.
+
+- The `send_message` callback is called with a `timeout` equal to `RTT` (in microseconds) for a Requester, and `0` for a Responder.
+- The `receive_message` callback is called with `timeout = RTT + CT` (or `RTT + ST1`) for a Requester, and `0` for a Responder.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="send_message" type="libspdm_device_send_message_func" required>
+  Callback to send a transport-layer SPDM message. Signature:
+  ```c
+  libspdm_return_t send_fn(void *spdm_context, size_t message_size,
+                            const void *message, uint64_t timeout);
+  ```
+</ParamField>
+
+<ParamField path="receive_message" type="libspdm_device_receive_message_func" required>
+  Callback to receive a transport-layer SPDM message. Signature:
+  ```c
+  libspdm_return_t recv_fn(void *spdm_context, size_t *message_size,
+                            void **message, uint64_t timeout);
+  ```
+</ParamField>
+
+```c
+libspdm_register_device_io_func(
+    spdm_context,
+    my_send_message,
+    my_receive_message);
+```
+
+</Accordion>
+
+<Accordion title="libspdm_register_transport_layer_func">
+
+Registers the transport layer encode/decode callbacks and associated sizing constants.
+
+**Signature**
+```c
+void libspdm_register_transport_layer_func(
+    void *spdm_context,
+    uint32_t max_spdm_msg_size,
+    uint32_t transport_header_size,
+    uint32_t transport_tail_size,
+    libspdm_transport_encode_message_func transport_encode_message,
+    libspdm_transport_decode_message_func transport_decode_message);
+```
+
+**Description**
+
+Must be called after `libspdm_init_context` and before any SPDM communication. Use the pre-built MCTP or PCI DOE transport libraries, or supply a custom implementation.
+
+For MCTP, pass `LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE` and `LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE`.
+For PCI DOE, pass `LIBSPDM_PCI_DOE_TRANSPORT_HEADER_SIZE` and `LIBSPDM_PCI_DOE_TRANSPORT_TAIL_SIZE`.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="max_spdm_msg_size" type="uint32_t" required>
+  Maximum SPDM message size in bytes. This value drives the `DataTransferSize` capability negotiation.
+</ParamField>
+
+<ParamField path="transport_header_size" type="uint32_t" required>
+  Number of bytes consumed by the transport header (e.g. `LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE`).
+</ParamField>
+
+<ParamField path="transport_tail_size" type="uint32_t" required>
+  Number of bytes consumed by the transport trailer, including random padding and AEAD tag (e.g. `LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE`).
+</ParamField>
+
+<ParamField path="transport_encode_message" type="libspdm_transport_encode_message_func" required>
+  Callback to wrap an SPDM message in the transport framing. For MCTP use `libspdm_transport_mctp_encode_message`.
+</ParamField>
+
+<ParamField path="transport_decode_message" type="libspdm_transport_decode_message_func" required>
+  Callback to unwrap a transport frame and expose the SPDM message. For MCTP use `libspdm_transport_mctp_decode_message`.
+</ParamField>
+
+```c
+libspdm_register_transport_layer_func(
+    spdm_context,
+    LIBSPDM_MAX_SPDM_MSG_SIZE,
+    LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE,
+    LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE,
+    libspdm_transport_mctp_encode_message,
+    libspdm_transport_mctp_decode_message);
+```
+
+</Accordion>
+
+<Accordion title="libspdm_register_device_buffer_func">
+
+Registers callbacks for acquiring and releasing sender and receiver transport buffers.
+
+**Signature**
+```c
+void libspdm_register_device_buffer_func(
+    void *spdm_context,
+    uint32_t sender_buffer_size,
+    uint32_t receiver_buffer_size,
+    libspdm_device_acquire_sender_buffer_func acquire_sender_buffer,
+    libspdm_device_release_sender_buffer_func release_sender_buffer,
+    libspdm_device_acquire_receiver_buffer_func acquire_receiver_buffer,
+    libspdm_device_release_receiver_buffer_func release_receiver_buffer);
+```
+
+**Description**
+
+Must be called after `libspdm_init_context` and before any SPDM communication. The buffer sizes must account for the transport framing overhead. The `SPDM_CAPABILITIES.DataTransferSize` value is derived from these sizes.
+
+Minimum buffer size formula:
+
+```
+MAX(
+  transport_header + DataTransferSize + alignment_pad,
+  secure_transport_header + AEAD_header + seq_num_size + AEAD_app_header
+      + DataTransferSize + random_size + AEAD_tag + alignment_pad
+)
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="sender_buffer_size" type="uint32_t" required>
+  Size of the sender buffer in bytes.
+</ParamField>
+
+<ParamField path="receiver_buffer_size" type="uint32_t" required>
+  Size of the receiver buffer in bytes.
+</ParamField>
+
+<ParamField path="acquire_sender_buffer" type="libspdm_device_acquire_sender_buffer_func" required>
+  Callback to obtain a pointer to the sender buffer. Returns `LIBSPDM_STATUS_SUCCESS` or `LIBSPDM_STATUS_ACQUIRE_FAIL`.
+</ParamField>
+
+<ParamField path="release_sender_buffer" type="libspdm_device_release_sender_buffer_func" required>
+  Callback to release the sender buffer.
+</ParamField>
+
+<ParamField path="acquire_receiver_buffer" type="libspdm_device_acquire_receiver_buffer_func" required>
+  Callback to obtain a pointer to the receiver buffer. Returns `LIBSPDM_STATUS_SUCCESS` or `LIBSPDM_STATUS_ACQUIRE_FAIL`.
+</ParamField>
+
+<ParamField path="release_receiver_buffer" type="libspdm_device_release_receiver_buffer_func" required>
+  Callback to release the receiver buffer.
+</ParamField>
+
+```c
+libspdm_register_device_buffer_func(
+    spdm_context,
+    LIBSPDM_SENDER_BUFFER_SIZE,
+    LIBSPDM_RECEIVER_BUFFER_SIZE,
+    my_acquire_sender_buffer,
+    my_release_sender_buffer,
+    my_acquire_receiver_buffer,
+    my_release_receiver_buffer);
+```
+
+</Accordion>
+
+---
+
+## Context Data
+
+<Accordion title="libspdm_set_data">
+
+Writes a value into the SPDM context.
+
+**Signature**
+```c
+libspdm_return_t libspdm_set_data(
+    void *spdm_context,
+    libspdm_data_type_t data_type,
+    const libspdm_data_parameter_t *parameter,
+    const void *data,
+    size_t data_size);
+```
+
+**Description**
+
+Used to configure the local endpoint's capabilities, algorithms, certificates, and operational parameters before calling `libspdm_init_connection`. Some data types can also be queried from the peer endpoint (using `LIBSPDM_DATA_LOCATION_CONNECTION`) after a successful connection is established. See [Context Data Types](/api/context-data-types) for a full list of data types and their applicable locations.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="data_type" type="libspdm_data_type_t" required>
+  Identifies which element of the context to modify. See `libspdm_data_type_t`.
+</ParamField>
+
+<ParamField path="parameter" type="const libspdm_data_parameter_t *" required>
+  Type-specific qualifier. The `location` field is `LIBSPDM_DATA_LOCATION_LOCAL` for local endpoint configuration. `additional_data` carries slot ID, session ID, or other type-specific values depending on `data_type`.
+</ParamField>
+
+<ParamField path="data" type="const void *" required>
+  Pointer to the value to write.
+</ParamField>
+
+<ParamField path="data_size" type="size_t" required>
+  Size of the data in bytes.
+</ParamField>
+
+**Return value**
+
+`LIBSPDM_STATUS_SUCCESS` on success.
+
+```c
+libspdm_data_parameter_t param;
+param.location = LIBSPDM_DATA_LOCATION_LOCAL;
+
+uint32_t cap_flags = SPDM_GET_CAPABILITIES_REQUEST_FLAGS_CERT_CAP
+                   | SPDM_GET_CAPABILITIES_REQUEST_FLAGS_CHAL_CAP;
+libspdm_set_data(spdm_context, LIBSPDM_DATA_CAPABILITY_FLAGS,
+                 &param, &cap_flags, sizeof(cap_flags));
+
+uint32_t base_hash_algo = SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_256;
+libspdm_set_data(spdm_context, LIBSPDM_DATA_BASE_HASH_ALGO,
+                 &param, &base_hash_algo, sizeof(base_hash_algo));
+```
+
+</Accordion>
+
+<Accordion title="libspdm_get_data">
+
+Reads a value from the SPDM context.
+
+**Signature**
+```c
+libspdm_return_t libspdm_get_data(
+    void *spdm_context,
+    libspdm_data_type_t data_type,
+    const libspdm_data_parameter_t *parameter,
+    void *data,
+    size_t *data_size);
+```
+
+**Description**
+
+Retrieves configuration or negotiated data from the context. When `parameter.location` is `LIBSPDM_DATA_LOCATION_CONNECTION`, the function returns the value negotiated with or advertised by the peer endpoint. When it is `LIBSPDM_DATA_LOCATION_LOCAL`, it returns the locally configured value.
+
+On input, `*data_size` must indicate the size of the provided buffer. On output, `*data_size` is set to the actual data size. If the buffer is too small the function returns `LIBSPDM_STATUS_BUFFER_TOO_SMALL` and `*data_size` contains the required size.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="data_type" type="libspdm_data_type_t" required>
+  Identifies which element of the context to retrieve.
+</ParamField>
+
+<ParamField path="parameter" type="const libspdm_data_parameter_t *" required>
+  Type-specific qualifier. Set `location` to `LIBSPDM_DATA_LOCATION_CONNECTION` to read peer values or `LIBSPDM_DATA_LOCATION_LOCAL` for local values.
+</ParamField>
+
+<ParamField path="data" type="void *" required>
+  Pointer to the output buffer.
+</ParamField>
+
+<ParamField path="data_size" type="size_t *" required>
+  On input: size of `data` buffer. On output: actual bytes written (or required size if `LIBSPDM_STATUS_BUFFER_TOO_SMALL`).
+</ParamField>
+
+**Return value**
+
+`LIBSPDM_STATUS_SUCCESS` on success. `LIBSPDM_STATUS_BUFFER_TOO_SMALL` if the output buffer is too small.
+
+```c
+libspdm_data_parameter_t param;
+param.location = LIBSPDM_DATA_LOCATION_CONNECTION;
+
+uint32_t peer_flags;
+size_t data_size = sizeof(peer_flags);
+libspdm_get_data(spdm_context, LIBSPDM_DATA_CAPABILITY_FLAGS,
+                 &param, &peer_flags, &data_size);
+```
+
+</Accordion>
+
+---
+
+## Complete Initialization Example
+
+```c
+/* 1. Allocate and initialize context */
+void *spdm_context = malloc(libspdm_get_context_size());
+libspdm_init_context(spdm_context);
+
+/* 2. Register transport (MCTP example) */
+libspdm_register_device_io_func(spdm_context,
+    my_send_message, my_receive_message);
+libspdm_register_transport_layer_func(spdm_context,
+    LIBSPDM_MAX_SPDM_MSG_SIZE,
+    LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE,
+    LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE,
+    libspdm_transport_mctp_encode_message,
+    libspdm_transport_mctp_decode_message);
+libspdm_register_device_buffer_func(spdm_context,
+    LIBSPDM_SENDER_BUFFER_SIZE, LIBSPDM_RECEIVER_BUFFER_SIZE,
+    my_acquire_sender, my_release_sender,
+    my_acquire_receiver, my_release_receiver);
+
+/* 3. Allocate scratch buffer (must be after transport registration) */
+size_t scratch_size = libspdm_get_sizeof_required_scratch_buffer(spdm_context);
+void *scratch = malloc(scratch_size);
+libspdm_set_scratch_buffer(spdm_context, scratch, scratch_size);
+
+/* 4. Configure local capabilities and algorithms */
+libspdm_data_parameter_t param = { .location = LIBSPDM_DATA_LOCATION_LOCAL };
+
+uint32_t cap_flags = SPDM_GET_CAPABILITIES_REQUEST_FLAGS_CERT_CAP
+                   | SPDM_GET_CAPABILITIES_REQUEST_FLAGS_CHAL_CAP
+                   | SPDM_GET_CAPABILITIES_REQUEST_FLAGS_MEAS_CAP_10;
+libspdm_set_data(spdm_context, LIBSPDM_DATA_CAPABILITY_FLAGS, &param,
+                 &cap_flags, sizeof(cap_flags));
+
+uint32_t hash_algo = SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_256;
+libspdm_set_data(spdm_context, LIBSPDM_DATA_BASE_HASH_ALGO, &param,
+                 &hash_algo, sizeof(hash_algo));
+
+uint32_t asym_algo = SPDM_ALGORITHMS_BASE_ASYM_ALGO_TPM_ALG_ECDSA_ECC_NIST_P256;
+libspdm_set_data(spdm_context, LIBSPDM_DATA_BASE_ASYM_ALGO, &param,
+                 &asym_algo, sizeof(asym_algo));
+```
+
+---
+
+## Utility Functions
+
+<Accordion title="libspdm_reset_context">
+
+Resets the SPDM context to its initial state, clearing connection state and session information. The registered callbacks (device IO, transport, buffer functions) are preserved.
+
+**Signature**
+```c
+void libspdm_reset_context(void *spdm_context);
+```
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context to reset.
+</ParamField>
+
+Use this function to restart negotiation after a connection failure, or to establish a new connection over the same context without re-registering all callbacks.
+
+</Accordion>
+
+<Accordion title="libspdm_module_version">
+
+Returns the version of the libspdm library as a `uint32_t`.
+
+**Signature**
+```c
+uint32_t libspdm_module_version(void);
+```
+
+The version is encoded as `(major << 24) | (minor << 16) | (patch << 8)`.
+
+</Accordion>
+
+<Accordion title="libspdm_get_fips_mode">
+
+Returns whether FIPS 140-3 self-test mode is active.
+
+**Signature**
+```c
+bool libspdm_get_fips_mode(void);
+```
+
+Returns `true` if FIPS self-tests have been run and passed for the current context. See [FIPS 140-3 Support](/security/fips) for details.
+
+</Accordion>

@@ -1,0 +1,474 @@
+---
+title: "Cryptography API"
+description: "SPDM-specific cryptography functions built on top of the cryptlib HAL."
+---
+
+`spdm_crypt_lib` provides algorithm-dispatched cryptographic primitives used internally by libspdm. All functions accept an algorithm identifier (e.g. `base_hash_algo`, `base_asym_algo`, `aead_cipher_suite`) as their first argument and dispatch to the appropriate underlying implementation in the cryptography HAL (`cryptlib`).
+
+## Architecture Note
+
+libspdm separates cryptographic responsibilities into two layers:
+
+| Layer | Header | Who uses it |
+|---|---|---|
+| **cryptlib (HAL)** | `hal/library/cryptlib.h` | Integrators providing a crypto backend (e.g. OpenSSL, MbedTLS, a custom HSM driver). |
+| **spdm_crypt_lib** | `library/spdm_crypt_lib.h` | Used internally by the SPDM requester, responder, and secured message libraries. |
+
+**Integrators do not call `spdm_crypt_lib` directly.** Instead, they implement the `cryptlib` HAL to supply the underlying cryptographic primitives, and they use the public SPDM API (`spdm_common_lib`, `spdm_requester_lib`, `spdm_responder_lib`) for protocol operations.
+
+---
+
+## Algorithm Sizing Helpers
+
+These functions return the output or key size for a given algorithm identifier, which is useful when allocating buffers for signatures, hashes, or AEAD operations.
+
+<Accordion title="libspdm_get_hash_size">
+
+Returns the digest size in bytes for the specified base hash algorithm.
+
+**Signature**
+```c
+uint32_t libspdm_get_hash_size(uint32_t base_hash_algo);
+```
+
+<ParamField path="base_hash_algo" type="uint32_t" required>
+  One of the `SPDM_ALGORITHMS_BASE_HASH_ALGO_*` constants, e.g. `SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_256`.
+</ParamField>
+
+**Return value**
+
+Digest size in bytes (e.g. 32 for SHA-256, 48 for SHA-384, 64 for SHA-512).
+
+</Accordion>
+
+<Accordion title="libspdm_get_asym_signature_size">
+
+Returns the signature size in bytes for the specified asymmetric algorithm.
+
+**Signature**
+```c
+uint32_t libspdm_get_asym_signature_size(uint32_t base_asym_algo);
+```
+
+<ParamField path="base_asym_algo" type="uint32_t" required>
+  One of the `SPDM_ALGORITHMS_BASE_ASYM_ALGO_*` constants.
+</ParamField>
+
+**Return value**
+
+Signature size in bytes.
+
+</Accordion>
+
+<Accordion title="libspdm_get_aead_key_size / libspdm_get_aead_iv_size / libspdm_get_aead_tag_size">
+
+Return the key, IV, and authentication tag sizes in bytes for the specified AEAD algorithm.
+
+**Signatures**
+```c
+uint32_t libspdm_get_aead_key_size(uint16_t aead_cipher_suite);
+uint32_t libspdm_get_aead_iv_size(uint16_t aead_cipher_suite);
+uint32_t libspdm_get_aead_tag_size(uint16_t aead_cipher_suite);
+```
+
+<ParamField path="aead_cipher_suite" type="uint16_t" required>
+  One of the `SPDM_ALGORITHMS_AEAD_CIPHER_SUITE_*` constants.
+</ParamField>
+
+| Function | AES-128-GCM | AES-256-GCM | ChaCha20-Poly1305 |
+|---|---|---|---|
+| `get_aead_key_size` | 16 | 32 | 32 |
+| `get_aead_iv_size` | 12 | 12 | 12 |
+| `get_aead_tag_size` | 16 | 16 | 16 |
+
+</Accordion>
+
+---
+
+## Hash Functions
+
+<Accordion title="libspdm_hash_all">
+
+Computes a hash over a single contiguous buffer.
+
+**Signature**
+```c
+bool libspdm_hash_all(
+    uint32_t base_hash_algo,
+    const void *data,
+    size_t data_size,
+    uint8_t *hash_value);
+```
+
+<ParamField path="base_hash_algo" type="uint32_t" required>
+  Hash algorithm identifier.
+</ParamField>
+
+<ParamField path="data" type="const void *" required>
+  Pointer to the input data buffer.
+</ParamField>
+
+<ParamField path="data_size" type="size_t" required>
+  Size of the input data in bytes.
+</ParamField>
+
+<ParamField path="hash_value" type="uint8_t *" required>
+  Output buffer. Must be at least `libspdm_get_hash_size(base_hash_algo)` bytes.
+</ParamField>
+
+**Return value**
+
+`true` on success; `false` on failure.
+
+```c
+uint8_t digest[LIBSPDM_MAX_HASH_SIZE];
+libspdm_hash_all(SPDM_ALGORITHMS_BASE_HASH_ALGO_TPM_ALG_SHA_256,
+                 data, data_size, digest);
+```
+
+</Accordion>
+
+<Accordion title="libspdm_hash_init / libspdm_hash_update / libspdm_hash_final">
+
+Incremental hash computation for streaming or discontiguous data.
+
+**Signatures**
+```c
+bool libspdm_hash_init(uint32_t base_hash_algo, void *hash_context);
+bool libspdm_hash_update(uint32_t base_hash_algo, void *hash_context,
+                         const void *data, size_t data_size);
+bool libspdm_hash_final(uint32_t base_hash_algo, void *hash_context,
+                        uint8_t *hash_value);
+```
+
+**Description**
+
+Use `libspdm_hash_new` to allocate a context, `libspdm_hash_init` to initialize it, call `libspdm_hash_update` one or more times with data chunks, then call `libspdm_hash_final` to retrieve the digest. After `libspdm_hash_final`, the context is invalid and must be freed or re-initialized.
+
+```c
+void *hash_ctx = libspdm_hash_new(base_hash_algo);
+libspdm_hash_init(base_hash_algo, hash_ctx);
+libspdm_hash_update(base_hash_algo, hash_ctx, chunk1, chunk1_size);
+libspdm_hash_update(base_hash_algo, hash_ctx, chunk2, chunk2_size);
+uint8_t digest[LIBSPDM_MAX_HASH_SIZE];
+libspdm_hash_final(base_hash_algo, hash_ctx, digest);
+libspdm_hash_free(base_hash_algo, hash_ctx);
+```
+
+</Accordion>
+
+---
+
+## HMAC Functions
+
+<Accordion title="libspdm_hmac_all">
+
+Computes an HMAC over a single contiguous buffer.
+
+**Signature**
+```c
+bool libspdm_hmac_all(
+    uint32_t base_hash_algo,
+    const void *data,
+    size_t data_size,
+    const uint8_t *key,
+    size_t key_size,
+    uint8_t *hmac_value);
+```
+
+<ParamField path="base_hash_algo" type="uint32_t" required>
+  Hash algorithm used as the HMAC PRF.
+</ParamField>
+
+<ParamField path="data" type="const void *" required>
+  Input data buffer.
+</ParamField>
+
+<ParamField path="data_size" type="size_t" required>
+  Size of input data in bytes.
+</ParamField>
+
+<ParamField path="key" type="const uint8_t *" required>
+  HMAC key buffer.
+</ParamField>
+
+<ParamField path="key_size" type="size_t" required>
+  HMAC key size in bytes.
+</ParamField>
+
+<ParamField path="hmac_value" type="uint8_t *" required>
+  Output buffer. Must be at least `libspdm_get_hash_size(base_hash_algo)` bytes.
+</ParamField>
+
+**Return value**
+
+`true` on success; `false` on failure.
+
+</Accordion>
+
+---
+
+## Asymmetric Signature Verification
+
+<Accordion title="libspdm_asym_verify">
+
+Verifies an asymmetric signature over a message (before hashing).
+
+**Signature**
+```c
+bool libspdm_asym_verify(
+    spdm_version_number_t spdm_version,
+    uint8_t op_code,
+    uint32_t base_asym_algo,
+    uint32_t base_hash_algo,
+    void *context,
+    const uint8_t *message,
+    size_t message_size,
+    const uint8_t *signature,
+    size_t sig_size);
+```
+
+**Description**
+
+Hashes `message` using `base_hash_algo` and then verifies the signature. The `context` pointer must have been obtained from `libspdm_asym_get_public_key_from_x509` or `libspdm_asym_get_public_key_from_der`.
+
+<ParamField path="spdm_version" type="spdm_version_number_t" required>
+  Negotiated SPDM version, used to determine signature endianness rules.
+</ParamField>
+
+<ParamField path="op_code" type="uint8_t" required>
+  SPDM request/response op code of the message being verified (used in signature construction).
+</ParamField>
+
+<ParamField path="base_asym_algo" type="uint32_t" required>
+  Asymmetric algorithm identifier.
+</ParamField>
+
+<ParamField path="base_hash_algo" type="uint32_t" required>
+  Hash algorithm used to hash the message before signing.
+</ParamField>
+
+<ParamField path="context" type="void *" required>
+  Asymmetric key context holding the public key.
+</ParamField>
+
+<ParamField path="message" type="const uint8_t *" required>
+  The message to verify (before hashing).
+</ParamField>
+
+<ParamField path="message_size" type="size_t" required>
+  Message size in bytes.
+</ParamField>
+
+<ParamField path="signature" type="const uint8_t *" required>
+  The signature bytes to verify.
+</ParamField>
+
+<ParamField path="sig_size" type="size_t" required>
+  Signature size in bytes.
+</ParamField>
+
+**Return value**
+
+`true` if the signature is valid; `false` otherwise.
+
+</Accordion>
+
+---
+
+## AEAD Encryption / Decryption
+
+<Accordion title="libspdm_aead_encryption">
+
+Performs AEAD authenticated encryption.
+
+**Signature**
+```c
+bool libspdm_aead_encryption(
+    const spdm_version_number_t secured_message_version,
+    uint16_t aead_cipher_suite,
+    const uint8_t *key, size_t key_size,
+    const uint8_t *iv, size_t iv_size,
+    const uint8_t *a_data, size_t a_data_size,
+    const uint8_t *data_in, size_t data_in_size,
+    uint8_t *tag_out, size_t tag_size,
+    uint8_t *data_out, size_t *data_out_size);
+```
+
+**Description**
+
+Encrypts `data_in` using the specified AEAD cipher and produces `data_out` plus an authentication tag `tag_out`. The additional authenticated data `a_data` is authenticated but not encrypted.
+
+<ParamField path="secured_message_version" type="spdm_version_number_t" required>
+  The negotiated secured message version.
+</ParamField>
+
+<ParamField path="aead_cipher_suite" type="uint16_t" required>
+  AEAD algorithm: `SPDM_ALGORITHMS_AEAD_CIPHER_SUITE_AES_256_GCM`, `SPDM_ALGORITHMS_AEAD_CIPHER_SUITE_CHACHA20_POLY1305`, etc.
+</ParamField>
+
+<ParamField path="key" type="const uint8_t *" required>
+  Encryption key buffer.
+</ParamField>
+
+<ParamField path="key_size" type="size_t" required>
+  Key size (use `libspdm_get_aead_key_size`).
+</ParamField>
+
+<ParamField path="iv" type="const uint8_t *" required>
+  Initialization vector buffer.
+</ParamField>
+
+<ParamField path="iv_size" type="size_t" required>
+  IV size (use `libspdm_get_aead_iv_size`).
+</ParamField>
+
+<ParamField path="a_data" type="const uint8_t *" required>
+  Additional authenticated data (AAD).
+</ParamField>
+
+<ParamField path="a_data_size" type="size_t" required>
+  Size of AAD in bytes.
+</ParamField>
+
+<ParamField path="data_in" type="const uint8_t *" required>
+  Plaintext input buffer.
+</ParamField>
+
+<ParamField path="data_in_size" type="size_t" required>
+  Plaintext size in bytes.
+</ParamField>
+
+<ParamField path="tag_out" type="uint8_t *" required>
+  Output buffer for the authentication tag.
+</ParamField>
+
+<ParamField path="tag_size" type="size_t" required>
+  Tag buffer size (use `libspdm_get_aead_tag_size`).
+</ParamField>
+
+<ParamField path="data_out" type="uint8_t *" required>
+  Output buffer for ciphertext.
+</ParamField>
+
+<ParamField path="data_out_size" type="size_t *" required>
+  On input: ciphertext buffer capacity. On output: actual ciphertext size.
+</ParamField>
+
+**Return value**
+
+`true` on success; `false` on failure.
+
+</Accordion>
+
+<Accordion title="libspdm_aead_decryption">
+
+Performs AEAD authenticated decryption and tag verification.
+
+**Signature**
+```c
+bool libspdm_aead_decryption(
+    const spdm_version_number_t secured_message_version,
+    uint16_t aead_cipher_suite,
+    const uint8_t *key, size_t key_size,
+    const uint8_t *iv, size_t iv_size,
+    const uint8_t *a_data, size_t a_data_size,
+    const uint8_t *data_in, size_t data_in_size,
+    const uint8_t *tag, size_t tag_size,
+    uint8_t *data_out, size_t *data_out_size);
+```
+
+**Description**
+
+Decrypts `data_in` and verifies the authentication tag `tag`. Returns `false` if the tag does not match (indicating tampering or key mismatch).
+
+Parameters mirror `libspdm_aead_encryption`. `tag` is the authentication tag to verify (input, not output).
+
+**Return value**
+
+`true` if decryption succeeded and the tag is valid; `false` otherwise.
+
+</Accordion>
+
+---
+
+## Key Derivation
+
+<Accordion title="libspdm_hkdf_extract / libspdm_hkdf_expand">
+
+HMAC-based Key Derivation Function (HKDF) extract and expand operations (RFC 5869).
+
+**Signatures**
+```c
+bool libspdm_hkdf_extract(
+    uint32_t base_hash_algo,
+    const uint8_t *ikm, size_t ikm_size,
+    const uint8_t *salt, size_t salt_size,
+    uint8_t *prk_out, size_t prk_out_size);
+
+bool libspdm_hkdf_expand(
+    uint32_t base_hash_algo,
+    const uint8_t *prk, size_t prk_size,
+    const uint8_t *info, size_t info_size,
+    uint8_t *out, size_t out_size);
+```
+
+**Description**
+
+`libspdm_hkdf_extract` derives a pseudorandom key from input key material (`ikm`) and an optional `salt`. `libspdm_hkdf_expand` expands a pseudorandom key `prk` with application-specific `info` into output key material of `out_size` bytes.
+
+These functions are used internally by the SPDM library during session key derivation. Integrators can use them to derive application-level keys from the Export Master Secret.
+
+<ParamField path="base_hash_algo" type="uint32_t" required>
+  The hash algorithm for the HMAC PRF.
+</ParamField>
+
+**Return value**
+
+`true` on success; `false` on failure.
+
+```c
+/* Derive an application key from the Export Master Secret */
+uint8_t prk[LIBSPDM_MAX_HASH_SIZE];
+size_t prk_size = sizeof(prk);
+libspdm_hkdf_extract(base_hash_algo,
+                     export_master_secret, ems_size,
+                     NULL, 0,  /* no salt */
+                     prk, hash_size);
+
+uint8_t app_key[32];
+const uint8_t info[] = "my-app-key v1";
+libspdm_hkdf_expand(base_hash_algo,
+                    prk, hash_size,
+                    info, sizeof(info) - 1,
+                    app_key, sizeof(app_key));
+```
+
+</Accordion>
+
+---
+
+## Random Number Generation
+
+<Accordion title="libspdm_get_random_number">
+
+Generates cryptographically random bytes.
+
+**Signature**
+```c
+bool libspdm_get_random_number(size_t size, uint8_t *rand);
+```
+
+<ParamField path="size" type="size_t" required>
+  Number of random bytes to generate.
+</ParamField>
+
+<ParamField path="rand" type="uint8_t *" required>
+  Output buffer. Must be at least `size` bytes.
+</ParamField>
+
+**Return value**
+
+`true` on success; `false` if the random number generator failed.
+
+</Accordion>

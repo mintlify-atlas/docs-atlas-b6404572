@@ -1,0 +1,328 @@
+---
+title: "Secured Message API"
+description: "Functions for encoding, decoding, and managing SPDM secured message contexts and session keys."
+---
+
+The secured message library (`spdm_secured_message_lib`) handles AEAD encryption and decryption of SPDM application messages within an established session. A `spdm_secured_message_context` holds all cryptographic material for a single session, including AEAD keys, salts, and sequence numbers.
+
+The `spdm_secured_message_context` is typically embedded within the main `spdm_context`. Once a session is established, obtain the secured message context pointer via:
+
+```c
+void *sec_ctx = libspdm_get_secured_message_context_via_session_id(
+    spdm_context, session_id);
+```
+
+---
+
+## Context Sizing
+
+<Accordion title="libspdm_secured_message_get_context_size">
+
+Returns the size in bytes of a single secured message context.
+
+**Signature**
+```c
+size_t libspdm_secured_message_get_context_size(void);
+```
+
+**Description**
+
+Used when placing secured message contexts in separate (potentially protected) memory, together with `libspdm_get_context_size_without_secured_context` and `libspdm_init_context_with_secured_context`.
+
+**Return value**
+
+Size in bytes of one `spdm_secured_message_context`.
+
+```c
+size_t sec_ctx_size = libspdm_secured_message_get_context_size();
+void *sec_ctx_mem = allocate_secure_memory(sec_ctx_size * LIBSPDM_MAX_SESSION_COUNT);
+```
+
+</Accordion>
+
+---
+
+## Session State
+
+<Accordion title="libspdm_secured_message_get_session_state">
+
+Returns the session state tracked by a secured message context.
+
+**Signature**
+```c
+libspdm_session_state_t libspdm_secured_message_get_session_state(
+    void *spdm_secured_message_context);
+```
+
+<ParamField path="spdm_secured_message_context" type="void *" required>
+  A pointer to the secured message context.
+</ParamField>
+
+**Return value**
+
+One of:
+- `LIBSPDM_SESSION_STATE_NOT_STARTED` — Context not yet used, or session has ended.
+- `LIBSPDM_SESSION_STATE_HANDSHAKING` — Session is in the handshake phase; the Responder may be authenticating the Requester.
+- `LIBSPDM_SESSION_STATE_ESTABLISHED` — Session fully established; application data may flow.
+
+```c
+void *sec_ctx = libspdm_get_secured_message_context_via_session_id(
+    spdm_context, session_id);
+if (libspdm_secured_message_get_session_state(sec_ctx) ==
+        LIBSPDM_SESSION_STATE_ESTABLISHED) {
+    /* safe to send application data */
+}
+```
+
+</Accordion>
+
+---
+
+## Message Encode / Decode
+
+<Accordion title="libspdm_encode_secured_message">
+
+Encrypts an application message and wraps it as a secured SPDM message.
+
+**Signature**
+```c
+libspdm_return_t libspdm_encode_secured_message(
+    void *spdm_secured_message_context,
+    uint32_t session_id,
+    bool is_request_message,
+    size_t app_message_size,
+    void *app_message,
+    size_t *secured_message_size,
+    void *secured_message,
+    const libspdm_secured_message_callbacks_t *spdm_secured_message_callbacks);
+```
+
+**Description**
+
+Encrypts `app_message` using the AEAD key and salt from the secured message context and produces an encoded secured message. The `app_message` buffer must have space before it for `spdm_secured_message_cipher_header_t` and space after `(app_message + app_message_size)` for random bytes. This layout is satisfied when the message resides in the SPDM scratch buffer.
+
+This function is normally called indirectly by the transport layer encode functions. Integrators performing manual secured message handling (e.g., when bypassing the standard dispatch path) may call it directly.
+
+<ParamField path="spdm_secured_message_context" type="void *" required>
+  A pointer to the secured message context for the session.
+</ParamField>
+
+<ParamField path="session_id" type="uint32_t" required>
+  The session ID bound to this secured message context.
+</ParamField>
+
+<ParamField path="is_request_message" type="bool" required>
+  `true` if the caller is a Requester; `false` if the caller is a Responder.
+</ParamField>
+
+<ParamField path="app_message_size" type="size_t" required>
+  Size of the plaintext application message in bytes.
+</ParamField>
+
+<ParamField path="app_message" type="void *" required>
+  Pointer to the plaintext message. Must reside in the scratch buffer with the layout constraints described above.
+</ParamField>
+
+<ParamField path="secured_message_size" type="size_t *" required>
+  On input: capacity of `secured_message` buffer. On output: size of the encoded secured message.
+</ParamField>
+
+<ParamField path="secured_message" type="void *" required>
+  Pointer to the destination buffer (in the sender buffer) for the secured message.
+</ParamField>
+
+<ParamField path="spdm_secured_message_callbacks" type="const libspdm_secured_message_callbacks_t *" required>
+  Callbacks providing transport-layer-specific sequence number handling and version mapping. Use the callbacks from the active transport (e.g. `libspdm_mctp_get_sequence_number`).
+</ParamField>
+
+**Return value**
+
+`LIBSPDM_STATUS_SUCCESS` on success.
+
+</Accordion>
+
+<Accordion title="libspdm_decode_secured_message">
+
+Decrypts and verifies a secured SPDM message to recover the inner application message.
+
+**Signature**
+```c
+libspdm_return_t libspdm_decode_secured_message(
+    void *spdm_secured_message_context,
+    uint32_t session_id,
+    bool is_request_message,
+    size_t secured_message_size,
+    void *secured_message,
+    size_t *app_message_size,
+    void **app_message,
+    const libspdm_secured_message_callbacks_t *spdm_secured_message_callbacks);
+```
+
+**Description**
+
+Decrypts `secured_message` using the session AEAD key and verifies the authentication tag. The output pointer `*app_message` is set to point within the scratch buffer where the plaintext message resides.
+
+<ParamField path="spdm_secured_message_context" type="void *" required>
+  A pointer to the secured message context.
+</ParamField>
+
+<ParamField path="session_id" type="uint32_t" required>
+  The session ID bound to this context.
+</ParamField>
+
+<ParamField path="is_request_message" type="bool" required>
+  `true` if the caller is a Requester; `false` for a Responder.
+</ParamField>
+
+<ParamField path="secured_message_size" type="size_t" required>
+  Size of the encrypted secured message in bytes.
+</ParamField>
+
+<ParamField path="secured_message" type="void *" required>
+  Pointer to the encrypted secured message (in the receiver buffer).
+</ParamField>
+
+<ParamField path="app_message_size" type="size_t *" required>
+  On input: capacity of the scratch buffer for the decrypted message. On output: actual decrypted message size.
+</ParamField>
+
+<ParamField path="app_message" type="void **" required>
+  On input: pointer to the scratch buffer. On output: points to the start of the decrypted application message within the scratch buffer.
+</ParamField>
+
+<ParamField path="spdm_secured_message_callbacks" type="const libspdm_secured_message_callbacks_t *" required>
+  Transport-layer callbacks. Must match those used during encoding.
+</ParamField>
+
+**Return value**
+
+`LIBSPDM_STATUS_SUCCESS` on success. A non-zero status (e.g. `LIBSPDM_STATUS_CRYPTO_ERROR`) indicates decryption failure or authentication tag mismatch.
+
+</Accordion>
+
+---
+
+## Key Material Export
+
+<Accordion title="libspdm_secured_message_export_master_secret">
+
+Copies the Export Master Secret from the secured message context to an integrator-provided buffer.
+
+**Signature**
+```c
+bool libspdm_secured_message_export_master_secret(
+    void *spdm_secured_message_context,
+    void *export_master_secret,
+    size_t *export_master_secret_size);
+```
+
+**Description**
+
+The Export Master Secret is derived from the session handshake and has the same length as the negotiated hash digest. If the destination buffer is smaller than the secret, only the first `*export_master_secret_size` bytes are copied. Call `libspdm_secured_message_clear_export_master_secret` after copying to erase the secret from the context.
+
+<ParamField path="spdm_secured_message_context" type="void *" required>
+  A pointer to the secured message context.
+</ParamField>
+
+<ParamField path="export_master_secret" type="void *" required>
+  Destination buffer for the Export Master Secret.
+</ParamField>
+
+<ParamField path="export_master_secret_size" type="size_t *" required>
+  On input: size of the destination buffer. On output: bytes actually copied.
+</ParamField>
+
+**Return value**
+
+`true` on success; `false` on failure.
+
+</Accordion>
+
+<Accordion title="libspdm_secured_message_clear_export_master_secret">
+
+Erases the Export Master Secret from the secured message context.
+
+**Signature**
+```c
+void libspdm_secured_message_clear_export_master_secret(
+    void *spdm_secured_message_context);
+```
+
+**Description**
+
+Typically called immediately after `libspdm_secured_message_export_master_secret` to ensure the secret does not remain in context memory longer than necessary.
+
+<ParamField path="spdm_secured_message_context" type="void *" required>
+  A pointer to the secured message context.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="libspdm_secured_message_export_session_keys">
+
+Exports the current AEAD encryption keys, salts, and sequence numbers to a packed buffer.
+
+**Signature**
+```c
+bool libspdm_secured_message_export_session_keys(
+    void *spdm_secured_message_context,
+    void *session_keys,
+    size_t *session_keys_size);
+```
+
+**Description**
+
+Should only be called after the session is fully established (`LIBSPDM_SESSION_STATE_ESTABLISHED`). The exported data uses the `libspdm_secure_session_keys_struct_t` layout:
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 4 | Struct version (`LIBSPDM_SECURE_SESSION_KEYS_STRUCT_VERSION`) |
+| 4 | 4 | AEAD key size in bytes |
+| 8 | 4 | AEAD IV size in bytes |
+| 12 | `aead_key_size` | Requester direction encryption key |
+| 12+key | `aead_iv_size` | Requester direction salt |
+| 12+key+iv | 8 | Requester direction sequence number |
+| 20+key+iv | `aead_key_size` | Responder direction encryption key |
+| 20+2*key+iv | `aead_iv_size` | Responder direction salt |
+| 20+2*key+2*iv | 8 | Responder direction sequence number |
+
+<ParamField path="spdm_secured_message_context" type="void *" required>
+  A pointer to the secured message context.
+</ParamField>
+
+<ParamField path="session_keys" type="void *" required>
+  Destination buffer for the session key material.
+</ParamField>
+
+<ParamField path="session_keys_size" type="size_t *" required>
+  On output: actual bytes written.
+</ParamField>
+
+**Return value**
+
+`true` on success; `false` on failure.
+
+</Accordion>
+
+---
+
+## Session Key Lifecycle Example
+
+```c
+/* Obtain the secured message context after a session is established */
+void *sec_ctx = libspdm_get_secured_message_context_via_session_id(
+    spdm_context, session_id);
+
+/* Verify the session is ready */
+assert(libspdm_secured_message_get_session_state(sec_ctx) ==
+       LIBSPDM_SESSION_STATE_ESTABLISHED);
+
+/* Export and immediately clear the Export Master Secret */
+uint8_t ems[LIBSPDM_MAX_HASH_SIZE];
+size_t ems_size = sizeof(ems);
+if (libspdm_secured_message_export_master_secret(sec_ctx, ems, &ems_size)) {
+    /* Use ems[0..ems_size-1] to derive application keys */
+    libspdm_secured_message_clear_export_master_secret(sec_ctx);
+    memset(ems, 0, ems_size); /* erase local copy */
+}
+```

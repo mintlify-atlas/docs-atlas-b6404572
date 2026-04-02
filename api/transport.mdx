@@ -1,0 +1,292 @@
+---
+title: "Transport API"
+description: "MCTP and PCI DOE transport layer encode/decode functions and sizing constants."
+---
+
+libspdm ships two built-in transport layer implementations: MCTP (DSP0236) and PCI Data Object Exchange (PCI DOE, PCIe spec). These functions are passed to `libspdm_register_transport_layer_func` and handle framing, encryption, and decryption of SPDM messages at the transport layer.
+
+You can also implement a custom transport layer by supplying functions with the signatures `libspdm_transport_encode_message_func` and `libspdm_transport_decode_message_func` defined in `spdm_common_lib.h`.
+
+---
+
+## MCTP Transport
+
+The MCTP transport wraps SPDM messages in an MCTP message header (`mctp_message_header_t`). Secured messages include a 2-byte sequence number and up to 32 bytes of random padding.
+
+### Size Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE` | `2 + 8 + LIBSPDM_MCTP_SEQUENCE_NUMBER_COUNT` (= 12) | Bytes reserved at the beginning of the sender/receiver buffer for the MCTP transport header and secured message overhead. |
+| `LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE` | `LIBSPDM_MCTP_MAX_RANDOM_NUMBER_COUNT + LIBSPDM_MAX_AEAD_TAG_SIZE + (LIBSPDM_MCTP_ALIGNMENT - 1)` (= 48) | Bytes reserved at the end of the buffer for random padding, AEAD MAC tag, and alignment. |
+| `LIBSPDM_MCTP_SEQUENCE_NUMBER_COUNT` | `2` | Length of the sequence number field in bytes. |
+| `LIBSPDM_MCTP_MAX_RANDOM_NUMBER_COUNT` | `32` | Maximum random bytes appended to a secured MCTP message. |
+
+Pass `LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE` and `LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE` to `libspdm_register_transport_layer_func`.
+
+### Functions
+
+<Accordion title="libspdm_transport_mctp_encode_message">
+
+Encodes an SPDM or application message into an MCTP transport layer message.
+
+**Signature**
+```c
+libspdm_return_t libspdm_transport_mctp_encode_message(
+    void *spdm_context,
+    const uint32_t *session_id,
+    bool is_app_message,
+    bool is_requester,
+    size_t message_size,
+    void *message,
+    size_t *transport_message_size,
+    void **transport_message);
+```
+
+**Description**
+
+For a normal (unsecured) SPDM message, adds the MCTP transport header. For a secured message, encrypts the payload using the session's AEAD key and appends the MCTP transport header.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="const uint32_t *">
+  If non-NULL, the message is encrypted as a secured message bound to this session. If NULL, the message is transmitted in plaintext.
+</ParamField>
+
+<ParamField path="is_app_message" type="bool" required>
+  `true` if the message is an application (non-SPDM) message. `false` if it is an SPDM message.
+</ParamField>
+
+<ParamField path="is_requester" type="bool" required>
+  `true` if called from a Requester context; `false` if called from a Responder context.
+</ParamField>
+
+<ParamField path="message_size" type="size_t" required>
+  Size of the source message in bytes.
+</ParamField>
+
+<ParamField path="message" type="void *" required>
+  Pointer to the source message buffer. For a normal message, must point inside the acquired sender buffer. For a secured message, must point to the scratch buffer within the SPDM context.
+</ParamField>
+
+<ParamField path="transport_message_size" type="size_t *" required>
+  On input: capacity of the transport message buffer. On output: actual encoded message size.
+</ParamField>
+
+<ParamField path="transport_message" type="void **" required>
+  On input: pointer to `msg_buf_ptr` from the sender buffer. On output: points to the encoded transport message within the sender buffer.
+</ParamField>
+
+**Return value**
+
+`LIBSPDM_STATUS_SUCCESS` on success.
+
+</Accordion>
+
+<Accordion title="libspdm_transport_mctp_decode_message">
+
+Decodes an MCTP transport layer message to recover the inner SPDM or application message.
+
+**Signature**
+```c
+libspdm_return_t libspdm_transport_mctp_decode_message(
+    void *spdm_context,
+    uint32_t **session_id,
+    bool *is_app_message,
+    bool is_requester,
+    size_t transport_message_size,
+    void *transport_message,
+    size_t *message_size,
+    void **message);
+```
+
+**Description**
+
+Strips the MCTP transport header. For a secured message, decrypts the payload and verifies the AEAD tag.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="uint32_t **" required>
+  On output: `*session_id` is set to the session ID if this is a secured message, or NULL if it is a normal message.
+</ParamField>
+
+<ParamField path="is_app_message" type="bool *" required>
+  On output: set to `true` if the inner message is an application message.
+</ParamField>
+
+<ParamField path="is_requester" type="bool" required>
+  `true` if called from a Requester context; `false` if called from a Responder context.
+</ParamField>
+
+<ParamField path="transport_message_size" type="size_t" required>
+  Size of the raw transport message in bytes.
+</ParamField>
+
+<ParamField path="transport_message" type="void *" required>
+  Pointer to the raw transport message, which must be within the acquired receiver buffer.
+</ParamField>
+
+<ParamField path="message_size" type="size_t *" required>
+  On input: capacity of the output buffer. On output: size of the decoded message.
+</ParamField>
+
+<ParamField path="message" type="void **" required>
+  On input: pointer to the scratch buffer. On output: points to the decoded SPDM message (normal message → receiver buffer; secured message → scratch buffer).
+</ParamField>
+
+**Return value**
+
+`LIBSPDM_STATUS_SUCCESS` on success.
+
+</Accordion>
+
+---
+
+## PCI DOE Transport
+
+The PCI DOE transport wraps SPDM messages in a PCI DOE Data Object header (`pci_doe_data_object_header_t`). Secured messages have no sequence number or random padding but include 3 bytes of alignment padding.
+
+### Size Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `LIBSPDM_PCI_DOE_TRANSPORT_HEADER_SIZE` | `8 + 8 + 0` (= 16) | Bytes reserved for the PCI DOE transport header and secured message overhead. |
+| `LIBSPDM_PCI_DOE_TRANSPORT_TAIL_SIZE` | `0 + LIBSPDM_MAX_AEAD_TAG_SIZE + (LIBSPDM_PCI_DOE_ALIGNMENT - 1)` (= 19) | Bytes reserved for AEAD MAC tag and alignment padding. |
+| `LIBSPDM_PCI_DOE_SEQUENCE_NUMBER_COUNT` | `0` | PCI DOE does not use a sequence number field. |
+| `LIBSPDM_PCI_DOE_MAX_RANDOM_NUMBER_COUNT` | `0` | PCI DOE does not append random bytes. |
+
+### Functions
+
+<Accordion title="libspdm_transport_pci_doe_encode_message">
+
+Encodes an SPDM or application message into a PCI DOE transport layer message.
+
+**Signature**
+```c
+libspdm_return_t libspdm_transport_pci_doe_encode_message(
+    void *spdm_context,
+    const uint32_t *session_id,
+    bool is_app_message,
+    bool is_requester,
+    size_t message_size,
+    void *message,
+    size_t *transport_message_size,
+    void **transport_message);
+```
+
+Parameters are identical in role to `libspdm_transport_mctp_encode_message`. Pass `LIBSPDM_PCI_DOE_TRANSPORT_HEADER_SIZE` and `LIBSPDM_PCI_DOE_TRANSPORT_TAIL_SIZE` to `libspdm_register_transport_layer_func`.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="const uint32_t *">
+  If non-NULL, the message is secured using this session's keys.
+</ParamField>
+
+<ParamField path="is_app_message" type="bool" required>
+  `true` for application messages; `false` for SPDM messages.
+</ParamField>
+
+<ParamField path="is_requester" type="bool" required>
+  `true` if called from a Requester; `false` for a Responder.
+</ParamField>
+
+<ParamField path="message_size" type="size_t" required>
+  Size of the source message in bytes.
+</ParamField>
+
+<ParamField path="message" type="void *" required>
+  Pointer to the source message buffer.
+</ParamField>
+
+<ParamField path="transport_message_size" type="size_t *" required>
+  On input: buffer capacity. On output: encoded message size.
+</ParamField>
+
+<ParamField path="transport_message" type="void **" required>
+  On input/output: pointer to the sender buffer region.
+</ParamField>
+
+</Accordion>
+
+<Accordion title="libspdm_transport_pci_doe_decode_message">
+
+Decodes a PCI DOE transport layer message to recover the inner SPDM or application message.
+
+**Signature**
+```c
+libspdm_return_t libspdm_transport_pci_doe_decode_message(
+    void *spdm_context,
+    uint32_t **session_id,
+    bool *is_app_message,
+    bool is_requester,
+    size_t transport_message_size,
+    void *transport_message,
+    size_t *message_size,
+    void **message);
+```
+
+Parameters are identical in role to `libspdm_transport_mctp_decode_message`.
+
+<ParamField path="spdm_context" type="void *" required>
+  A pointer to the SPDM context.
+</ParamField>
+
+<ParamField path="session_id" type="uint32_t **" required>
+  On output: session ID for a secured message, or NULL for plaintext.
+</ParamField>
+
+<ParamField path="is_app_message" type="bool *" required>
+  On output: whether the inner message is an application message.
+</ParamField>
+
+<ParamField path="is_requester" type="bool" required>
+  `true` if called from a Requester; `false` for a Responder.
+</ParamField>
+
+<ParamField path="transport_message_size" type="size_t" required>
+  Size of the raw transport message in bytes.
+</ParamField>
+
+<ParamField path="transport_message" type="void *" required>
+  Pointer to the raw transport message in the receiver buffer.
+</ParamField>
+
+<ParamField path="message_size" type="size_t *" required>
+  On input: scratch buffer capacity. On output: decoded message size.
+</ParamField>
+
+<ParamField path="message" type="void **" required>
+  On input: scratch buffer pointer. On output: points to decoded message.
+</ParamField>
+
+</Accordion>
+
+---
+
+## Registration Example
+
+```c
+/* MCTP transport */
+libspdm_register_transport_layer_func(
+    spdm_context,
+    LIBSPDM_MAX_SPDM_MSG_SIZE,
+    LIBSPDM_MCTP_TRANSPORT_HEADER_SIZE,
+    LIBSPDM_MCTP_TRANSPORT_TAIL_SIZE,
+    libspdm_transport_mctp_encode_message,
+    libspdm_transport_mctp_decode_message);
+
+/* PCI DOE transport (alternative) */
+libspdm_register_transport_layer_func(
+    spdm_context,
+    LIBSPDM_MAX_SPDM_MSG_SIZE,
+    LIBSPDM_PCI_DOE_TRANSPORT_HEADER_SIZE,
+    LIBSPDM_PCI_DOE_TRANSPORT_TAIL_SIZE,
+    libspdm_transport_pci_doe_encode_message,
+    libspdm_transport_pci_doe_decode_message);
+```
